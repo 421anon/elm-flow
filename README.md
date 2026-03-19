@@ -20,33 +20,31 @@ The runtime interpreter (`Flow.Program`) drives these computations inside a stan
 
 ## Quick start
 
+With `elm-flow`, you do **not** define a custom `Msg` type or an `update` function.
+Instead, your `view` handlers and `subscriptions` emit `Flow` values directly,
+and the library runtime interprets them.
+
 ```elm
 import Flow exposing (Flow)
-import Flow.Channel exposing (Channel)
+import Html
+import Html.Events
 
 type alias Model =
-    { count : Int, loading : Bool }
+    { count : Int }
 
-type Msg
-    = Increment
-    | Decrement
-
-update : Msg -> Flow Model Msg
-update msg =
-    case msg of
-        Increment ->
-            Flow.modify (\m -> { m | count = m.count + 1 })
-
-        Decrement ->
-            Flow.modify (\m -> { m | count = m.count - 1 })
-
-main : Flow.Program () Model Msg
+main : Flow.Program () Model Never
 main =
-    Flow.sandbox
-        { init = \_ -> ( { count = 0, loading = False }, Flow.none )
+    Flow.element
+        { init = \_ -> ( { count = 0 }, Flow.none )
         , view = view
         , subscriptions = \_ -> Sub.none
         }
+
+view : Model -> Html.Html (Flow Model ())
+view model =
+    Html.button
+        [ Html.Events.onClick (Flow.modify (\m -> { m | count = m.count + 1 })) ]
+        [ Html.text ("Count: " ++ String.fromInt model.count) ]
 ```
 
 ## Channels

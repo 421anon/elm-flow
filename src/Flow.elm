@@ -1,5 +1,5 @@
 module Flow exposing
-    ( Flow, Program
+    ( Flow
     , element, document, application
     , await, subscribe
     , pure, lift, liftUpdate
@@ -13,6 +13,7 @@ module Flow exposing
     , attemptTask
     , try, forAll, getAll, over, setAll, via
     , when, return, async, bracket_, setting, locking
+    , Program
     )
 
 {-| A monadic interface for _The Elm Architecture_, bridging synchronous state
@@ -463,6 +464,7 @@ forceRendering =
 
 type alias Program flags s a =
     Platform.Program flags ( s, Flow.Program.Model (Flow s a) ) (Flow.Program.RuntimeMsg (Flow s a))
+
 
 element :
     { init : flags -> ( s, Flow s a )

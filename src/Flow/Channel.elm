@@ -9,6 +9,14 @@ module Flow.Channel exposing
     , join
     )
 
+{-| Channel primitives for connecting external event sources to `Flow`.
+
+Use `connect` when you have both a subscription source and an optional command
+to kick off/attach the channel, or `join` when you only need subscriptions.
+Then consume events with `Flow.await`, `Flow.awaitUntil`, or `Flow.subscribe`.
+
+-}
+
 import Flow.Internal exposing (Flow(..), andThen, async)
 
 
