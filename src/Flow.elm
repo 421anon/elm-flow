@@ -309,11 +309,12 @@ compose g f a =
     f a |> andThen g
 
 
-{-| Run the first Flow for its effects, discard its result, then run the
-second and return its result.
+{-| Run the piped Flow for its effects, discard its result, then run the
+argument Flow and return its result.
 
     saveRecord
         |> Flow.seq (Flow.pure "saved!")
+    -- runs saveRecord, then produces "saved!"
 
 -}
 seq : Flow s b -> Flow s a -> Flow s b
@@ -340,10 +341,18 @@ none =
     Flow.Internal.none
 
 
-{-| Run a list of Flow computations concurrently and collect all their results.
+{-| Run a list of Flow computations as concurrent branches. Each branch runs
+independently; the continuation (via `andThen`) is invoked once per branch
+with that branch's individual result.
 
-    Flow.batchM [ fetchUser, fetchSettings, fetchPermissions ]
-        |> Flow.andThen (\results -> ...)
+Use `mapM` instead if you want the results collected into a `List`.
+
+    -- fire three notifications in parallel
+    Flow.batchM [ notifyAlice, notifyBob, notifyCarol ]
+
+    -- continuation runs once per branch, not once with a List
+    Flow.batchM [ fetchUserA, fetchUserB ]
+        |> Flow.andThen (\user -> renderUser user)
 
 -}
 batchM : List (Flow s a) -> Flow s a
@@ -452,9 +461,16 @@ yield a =
     lift (Task.perform (\_ -> a) (Process.sleep 0))
 
 
-{-| Force a full render cycle before continuing by writing the current model
-back to itself via `yield`. Use this when you need the DOM to update between
-two state changes.
+{-| Wrap a Flow so that every state write inside it is followed by a render
+cycle, giving the browser a chance to repaint between steps.
+
+Useful when you need the UI to visually reflect intermediate states during a
+multi-step computation rather than only showing the final result.
+
+    -- the UI repaints after each step, not just at the end
+    Flow.forceRendering <|
+        Flow.mapM [ setStepOne, setStepTwo, setStepThree ]
+
 -}
 forceRendering : Flow a b -> Flow a b
 forceRendering =

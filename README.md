@@ -2,10 +2,15 @@
 
 A monadic interface for _The Elm Architecture_, bridging synchronous state modifications with asynchronous subscriptions via Channels.
 
-This library merges concepts from two community packages:
+This library merges concepts from two packages:
 
 - [`chrilves/elm-io`](https://package.elm-lang.org/packages/chrilves/elm-io/latest/) — the free monad interface for TEA
 - [`brian-watkins/elm-procedure`](https://github.com/brian-watkins/elm-procedure) — continuation-passing channels and subscriptions
+
+We wish to express our deep respect and heartfelt thanks to the authors of these packages.
+elm-flow is largely an amalgamation of the two enabled by the generosity of their authors,
+publishing these under the permissive MIT and BSD-3 licenses, respectively. We hereby
+republish our entire derivative work under BSD-3.
 
 ## Overview
 
@@ -69,42 +74,125 @@ listenLoop =
         myChannel
 ```
 
+## More examples
+
+### Async action with state preparation and error recovery
+
+Read state, do preparatory work, fire a command, recover on failure — all in a
+single linear pipeline with no `Msg` variants or pattern-match dispatch:
+
+```elm
+runJob : Int -> Flow Model ()
+runJob id =
+    Flow.get
+        |> Flow.andThen
+            (\model ->
+                -- flush any pending edits before running
+                Flow.when model.hasPendingEdits flushEdits
+                    |> Flow.seq (setStatus id Loading)
+                    |> Flow.seq (callApi (Api.start id model.config))
+            )
+        |> Flow.andThen
+            (\result ->
+                case result of
+                    Ok _ ->
+                        Flow.pure ()
+
+                    Err _ ->
+                        setStatus id Failed
+            )
+```
+
+### Subscribing to a server-sent event stream
+
+`subscribe` wires a channel to a handler function. When a single event carries
+multiple updates, `batchM` fans them out into concurrent branches:
+
+```elm
+listenForUpdates : Int -> Flow Model ()
+listenForUpdates roomId =
+    Flow.subscribe handleEvent (Channels.connect roomId)
+
+
+handleEvent : ServerMessage -> Flow Model ()
+handleEvent msg =
+    case msg of
+        Snapshot items ->
+            -- apply every item update as a concurrent branch
+            Flow.batchM (List.map applyUpdate items)
+
+        Heartbeat ->
+            Flow.pure ()
+
+        Error text ->
+            showToast text
+```
+
 ## Optics helpers
 
-When you have nested state, the optics helpers (`try`, `forAll`, `over`, `setAll`, `via`) work with [`erlandsona/elm-accessors`](https://package.elm-lang.org/packages/erlandsona/elm-accessors/latest/) lenses to target sub-fields without manual getter/setter boilerplate.
+Lenses give you composable read/write paths into nested data. The state monad
+gives you sequenced reads and writes. Put them together and you get something
+that reads like imperative mutation — but the result is a pure value, a data
+structure that can be passed around, combined, and transformed before a single
+effect ever runs.
 
-## API reference
+We recommend watching the recording of a talk by Edward Kmett titled "Lenses: A Functional Imperative"
 
-See the generated documentation for the full API.
+The optics helpers (`try`, `forAll`, `over`, `setAll`, `via`) work with
+[`erlandsona/elm-accessors`](https://package.elm-lang.org/packages/erlandsona/elm-accessors/latest/)
+lenses to target sub-fields without manual getter/setter boilerplate.
 
-### Core
+```elm
+type alias Model =
+    { user : { name : String, email : String, loginCount : Int }
+    }
 
-| Function | Description |
-|---|---|
-| `pure` | Lift a plain value into Flow |
-| `lift` | Lift a `Cmd` into Flow |
-| `get` / `set` / `modify` | Read and write the model |
-| `andThen` / `map` | Sequence and transform computations |
-| `batch` / `batchM` | Run multiple branches |
-| `none` | Terminate / no-op |
+-- Lenses: user, name, email, loginCount (defined once, composed with <<)
+-- <...>
+--
 
-### Async
+recordLogin : String -> String -> Flow Model ()
+recordLogin newName newEmail =
+    Flow.setAll (user << name) newName
+        |> Flow.seq (Flow.setAll (user << email) (String.toLower newEmail))
+        |> Flow.seq (Flow.over (user << loginCount) ((+) 1))
+```
 
-| Function | Description |
-|---|---|
-| `await` | Suspend until a Channel delivers one value |
-| `subscribe` | Handle every value from a Channel indefinitely |
-| `yield` | Force a render cycle before continuing |
-| `async` | Fire-and-forget a sub-computation |
+`via` zooms into a sub-model so you can write a self-contained `Flow` against it
+and reuse it anywhere that sub-model appears:
 
-### Control flow
+```elm
+-- operates only on User, with no knowledge of Model
+normaliseUser : Flow User ()
+normaliseUser =
+    Flow.over name String.trim
+        |> Flow.seq (Flow.over email String.toLower)
 
-| Function | Description |
-|---|---|
-| `when` | Conditional execution |
-| `bracket_` | Acquire/release resources around a computation |
-| `setting` | Temporarily set a Bool lens to `True` |
-| `locking` | Skip execution if a Bool lens is already `True` |
+-- embed into the full model through the `user` lens
+Flow.via user normaliseUser
+```
+
+## API quick reference
+
+**Core** —
+`pure` (lift a value),
+`lift` (lift a `Cmd`),
+`get` / `set` / `modify` (read and write the model),
+`andThen` / `map` (sequence and transform),
+`batch` / `batchM` (run multiple branches),
+`none` (terminate / no-op).
+
+**Async** —
+`await` (suspend until a Channel delivers one value),
+`subscribe` (handle every value indefinitely),
+`yield` (force a render cycle before continuing),
+`async` (fire-and-forget a sub-computation).
+
+**Control flow** —
+`when` (conditional execution),
+`bracket_` (acquire/release resources),
+`setting` (hold a `Bool` lens `True` for a computation),
+`locking` (skip if a `Bool` lens is already `True`).
 
 ## License
 

@@ -1,16 +1,17 @@
 module Flow.Channel exposing
-    ( Channel, ChannelKey
+    ( Channel
     , connect, join, filter
     , accept, acceptOne, acceptUntil
     )
 
 {-| Channel primitives for connecting external event sources to `Flow`.
 
-Use `connect` when you have both a subscription source and an optional command
-to kick off/attach the channel, or `join` when you only need subscriptions.
-Then consume events with `Flow.await`, `Flow.awaitUntil`, or `Flow.subscribe`.
+Use `connect` when you have both a subscription source and a command to
+kick off the channel, or `join` when subscriptions alone are enough.
+Then consume events with `Flow.await` (one event), `Flow.Channel.acceptUntil`
+(events until a condition), or `Flow.subscribe` (all events indefinitely).
 
-@docs Channel, ChannelKey
+@docs Channel
 @docs connect, join, filter
 @docs accept, acceptOne, acceptUntil
 
@@ -28,8 +29,9 @@ type alias ChannelKey =
     String
 
 
-{-| Opaque channel handle that describes how to connect an external event source
-to a `Flow` pipeline.
+{-| An opaque handle describing how to connect an external event source to a
+`Flow` pipeline. Build one with `connect` or `join`, then pass it to
+`Flow.await` or `Flow.subscribe`.
 -}
 type Channel s a
     = Channel
@@ -38,8 +40,19 @@ type Channel s a
         }
 
 
-{-| Build a channel from both a subscription source and a command that starts
-or attaches it.
+{-| Build a channel from a subscription source and a command that opens or
+attaches it. The command is fired once when the channel is first awaited.
+
+    -- Port declarations:
+    --   port onMessage : (String -> msg) -> Sub msg
+    --   port subscribe : String -> Cmd msg
+
+    myChannel : Channel Model String
+    myChannel =
+        Flow.Channel.connect
+            (\callback -> Ports.onMessage callback)
+            (\_ -> Ports.subscribe "myTopic")
+
 -}
 connect : ((a -> Maybe (Flow s a)) -> Sub (Maybe (Flow s a))) -> (ChannelKey -> Cmd (Flow s a)) -> Channel s a
 connect subPort cmdPort =
@@ -49,9 +62,14 @@ connect subPort cmdPort =
         }
 
 
-{-| Build a channel from subscriptions only.
+{-| Build a channel from a subscription source when no startup command is needed.
 
-Use this when no startup command is required.
+    -- Port declaration:
+    --   port onKeyDown : (String -> msg) -> Sub msg
+
+    keyChannel : Channel Model String
+    keyChannel =
+        Flow.Channel.join (\callback -> Ports.onKeyDown callback)
 
 -}
 join : ((a -> Maybe (Flow s a)) -> Sub (Maybe (Flow s a))) -> Channel s a
@@ -62,8 +80,14 @@ join subPort =
         }
 
 
-{-| Filter events for a channel using both the generated `ChannelKey` and the
-event payload.
+{-| Filter events for a channel. Only events for which the predicate returns
+`True` are forwarded; others are silently dropped.
+
+The predicate receives the internal channel key and the event payload.
+In most cases you only need the payload:
+
+    Flow.Channel.filter (\_ msg -> msg /= "") myChannel
+
 -}
 filter : (ChannelKey -> a -> Bool) -> Channel s a -> Channel s a
 filter predicate (Channel channel) =
@@ -89,7 +113,16 @@ awaitWith cmd (Channel channel) callback =
         (\key -> channel.subPort key callback)
 
 
-{-| Subscribe to a channel and handle every incoming event indefinitely.
+{-| Subscribe to a channel and run the handler for every incoming event,
+indefinitely. The subscription runs for the lifetime of the program with
+no built-in way to stop it.
+
+    listenForever : Flow Model ()
+    listenForever =
+        Flow.Channel.accept
+            (\msg -> Flow.modify (\m -> { m | lastMessage = msg }))
+            myChannel
+
 -}
 accept : (a -> Flow s ()) -> Channel s a -> Flow s a
 accept handler ((Channel channel) as ch) =
@@ -103,8 +136,13 @@ accept handler ((Channel channel) as ch) =
     awaitWith channel.cmdPort ch continuation
 
 
-{-| Wait for channel events until the predicate returns `True`, then return
-that final event.
+{-| Wait for events from a channel, discarding each one until the predicate
+returns `True`. Returns the first event that satisfies the predicate and
+then closes the channel.
+
+    -- wait until the server sends "done"
+    Flow.Channel.acceptUntil (\msg -> msg == "done") myChannel
+
 -}
 acceptUntil : (a -> Bool) -> Channel s a -> Flow s a
 acceptUntil shouldStop ((Channel channel) as ch) =
@@ -119,7 +157,13 @@ acceptUntil shouldStop ((Channel channel) as ch) =
         )
 
 
-{-| Wait for a single event from a channel and return it.
+{-| Wait for the next single event from a channel and return it. The channel
+is closed after the first event arrives.
+
+    -- read one message then continue
+    Flow.Channel.acceptOne myChannel
+        |> Flow.andThen (\msg -> Flow.modify (\m -> { m | lastMessage = msg }))
+
 -}
 acceptOne : Channel s a -> Flow s a
 acceptOne =
