@@ -2,9 +2,9 @@ module Flow.Program exposing
     ( Model
     , RuntimeMsg(..)
     , init
-    , runUpdate
+    , runtimeInit
+    , runtimeUpdate
     , subscriptions
-    , update
     )
 
 import Dict exposing (Dict)
@@ -29,13 +29,22 @@ init =
     }
 
 
-runUpdate : (a -> Flow s a) -> Flow s a -> s -> Model (Flow s a) -> ( s, Model (Flow s a), Cmd (RuntimeMsg (Flow s a)) )
-runUpdate f flow state registry =
+runtimeInit : ( s, Flow s a ) -> ( ( s, Model (Flow s a) ), Cmd (RuntimeMsg (Flow s a)) )
+runtimeInit ( m, fl ) =
+    let
+        ( newModel, newRegistry, cmd ) =
+            runUserUpdate fl m init
+    in
+    ( ( newModel, newRegistry ), cmd )
+
+
+runUserUpdate : Flow s a -> s -> Model (Flow s a) -> ( s, Model (Flow s a), Cmd (RuntimeMsg (Flow s a)) )
+runUserUpdate flow state registry =
     let
         recur fl m reg =
             case fl of
-                Pure msg ->
-                    recur (f msg) m reg
+                Pure _ ->
+                    ( m, reg, Cmd.none )
 
                 Get k ->
                     recur (k m) m reg
@@ -47,10 +56,10 @@ runUpdate f flow state registry =
                     let
                         ( finalM, finalReg, cmds ) =
                             List.foldl
-                                (\io ( currentM, currentReg, accCmds ) ->
+                                (\fl_ ( currentM, currentReg, accCmds ) ->
                                     let
                                         ( nextM, nextReg, cmd ) =
-                                            recur io currentM currentReg
+                                            recur fl_ currentM currentReg
                                     in
                                     ( nextM, nextReg, cmd :: accCmds )
                                 )
@@ -89,13 +98,13 @@ runUpdate f flow state registry =
     recur flow state registry
 
 
-update : (a -> Flow s a) -> RuntimeMsg (Flow s a) -> ( s, Model (Flow s a) ) -> ( ( s, Model (Flow s a) ), Cmd (RuntimeMsg (Flow s a)) )
-update userUpdate runtimeMsg ( userModel, registry ) =
+runtimeUpdate : RuntimeMsg (Flow s a) -> ( s, Model (Flow s a) ) -> ( ( s, Model (Flow s a) ), Cmd (RuntimeMsg (Flow s a)) )
+runtimeUpdate runtimeMsg ( userModel, registry ) =
     case runtimeMsg of
         UserFlow flow ->
             let
                 ( newModel, newRegistry, cmd ) =
-                    runUpdate userUpdate flow userModel registry
+                    runUserUpdate flow userModel registry
             in
             ( ( newModel, newRegistry ), cmd )
 
@@ -105,7 +114,7 @@ update userUpdate runtimeMsg ( userModel, registry ) =
                     { registry | channels = Dict.remove channelId registry.channels }
 
                 ( newModel, finalRegistry, cmd ) =
-                    runUpdate userUpdate flow userModel newRegistry
+                    runUserUpdate flow userModel newRegistry
             in
             ( ( newModel, finalRegistry ), cmd )
 
