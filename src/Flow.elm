@@ -1,6 +1,6 @@
 module Flow exposing
     ( Flow
-    , element, document, application
+    , Program, element, document, application
     , await, subscribe
     , pure, lift, liftUpdate
     , get, set, modify
@@ -13,7 +13,6 @@ module Flow exposing
     , attemptTask
     , try, forAll, getAll, over, setAll, via
     , when, return, async, bracket_, setting, locking
-    , Program
     )
 
 {-| A monadic interface for _The Elm Architecture_, bridging synchronous state
@@ -49,7 +48,7 @@ co-located with the event that triggers it.
 
 # Running a web application
 
-@docs element, document, application
+@docs Program, element, document, application
 
 
 # Subscriptions and channels
@@ -462,10 +461,16 @@ forceRendering =
     replace get (set |> compose yield)
 
 
+{-| The concrete Elm `Platform.Program` type produced by `Flow.element`,
+`Flow.document`, and `Flow.application`.
+-}
 type alias Program flags s a =
     Platform.Program flags ( s, Flow.Program.Model (Flow s a) ) (Flow.Program.RuntimeMsg (Flow s a))
 
 
+{-| Build a standard `Browser.element` program whose messages are `Flow`
+computations.
+-}
 element :
     { init : flags -> ( s, Flow s a )
     , view : s -> Html (Flow s a)
