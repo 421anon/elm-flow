@@ -74,6 +74,40 @@ listenLoop =
         myChannel
 ```
 
+### FFI with dynamic dispatch
+
+Instead of creating a new port for every JavaScript interaction, you can use `Flow.ffi` to call many JS functions by name using a single pair of ports. 
+
+You provide the JS function name, an encoder for the outgoing data, and a decoder for the return value.
+
+```elm
+-- 1. Define one pair of ports
+port ffiOut : { key : String, fn : String, value : Json.Encode.Value } -> Cmd msg
+port ffiIn : ({ key : String, value : Json.Decode.Value } -> msg) -> Sub msg
+
+-- 2. Wire them into a helper
+callJs : String -> (a -> Json.Encode.Value) -> Json.Decode.Decoder b -> a -> Flow s b
+callJs =
+    Flow.ffi Ports.ffiOut Ports.ffiIn
+
+-- 3. Call any JS function by name
+fetchData : String -> Flow Model ()
+fetchData id =
+    callJs "fetchData" Json.Encode.string decodeData id
+        |> Flow.andThen handleData
+```
+
+```javascript
+// On the JavaScript side:
+app.ports.ffiOut.subscribe(async (req) => {
+    if (req.fn === "fetchData") {
+        const data = await fetch("/api/data/" + req.value).then(r => r.json());
+        // Return the data using the exact same key
+        app.ports.ffiIn.send({ key: req.key, value: data });
+    }
+});
+```
+
 ## More examples
 
 ### Async action with state preparation and error recovery

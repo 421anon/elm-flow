@@ -13,6 +13,7 @@ module Flow exposing
     , attemptTask
     , try, forAll, getAll, over, setAll, via
     , when, return, async, bracket_, setting, locking
+    , ffi
     )
 
 {-| A monadic interface for _The Elm Architecture_, bridging synchronous state
@@ -54,6 +55,7 @@ co-located with the event that triggers it.
 # Subscriptions and channels
 
 @docs await, subscribe
+@docs ffi
 
 
 # Lifting values and commands into Flow
@@ -119,6 +121,8 @@ import Flow.Channel exposing (Channel)
 import Flow.Internal exposing (..)
 import Flow.Program
 import Html exposing (Html)
+import Json.Decode
+import Json.Encode
 import Process
 import Task exposing (Task)
 import Url exposing (Url)
@@ -806,3 +810,62 @@ silently dropped.
 locking : A_Lens pr s Bool -> Flow s () -> Flow s ()
 locking lns io =
     forAll lns (\locked -> when (not locked) (setting lns io))
+
+
+{-| Instead of creating a new port for every JavaScript interaction, you can use `Flow.ffi`
+to call many JS functions by name using a single pair of ports.
+
+You provide the JS function name, an encoder for the outgoing data, and a decoder for
+the return value. Under the hood, this helper uses a unique string key to automatically
+match JavaScript responses back to the correct `Flow` request.
+
+    -- 1. Define one pair of ports
+    port ffiOut : { key : String, fn : String, value : Json.Encode.Value } -> Cmd msg
+    port ffiIn : ({ key : String, value : Json.Decode.Value } -> msg) -> Sub msg
+
+    -- 2. Wire them into a helper
+    callJs : String -> (a -> Json.Encode.Value) -> Json.Decode.Decoder b -> a -> Flow s b
+    callJs =
+        Flow.ffi Ports.ffiOut Ports.ffiIn
+
+    -- 3. Call any JS function by name
+    fetchData : String -> Flow Model ()
+    fetchData id =
+        callJs "fetchData" Json.Encode.string decodeData id
+            |> Flow.andThen handleData
+
+    -- On the JavaScript side:
+    -- app.ports.ffiOut.subscribe(async (req) => {
+    --     if (req.fn === "fetchData") {
+    --         const data = await fetch("/api/data/" + req.value).then(r => r.json());
+    --         app.ports.ffiIn.send({ key: req.key, value: data });
+    --     }
+    -- });
+-}
+ffi :
+    ({ key : String, fn : String, value : Json.Encode.Value } -> Cmd Never)
+    -> (({ key : String, value : Json.Decode.Value } -> Maybe (Flow s { key : String, payload : b })) -> Sub (Maybe (Flow s { key : String, payload : b })))
+    -> String
+    -> (a -> Json.Encode.Value)
+    -> Json.Decode.Decoder b
+    -> a
+    -> Flow s b
+ffi outPort inPort fnName encode decode payload =
+    let
+        channel =
+            Flow.Channel.connect
+                (\callback ->
+                    inPort
+                        (\msg ->
+                            case Json.Decode.decodeValue decode msg.value of
+                                Ok result ->
+                                    callback { key = msg.key, payload = result }
+
+                                Err _ ->
+                                    Nothing
+                        )
+                )
+                (\key -> Cmd.map never (outPort { key = key, fn = fnName, value = encode payload }))
+    in
+    Flow.Channel.acceptOne (Flow.Channel.filter (\key msg -> msg.key == key) channel)
+        |> andThen (\msg -> pure msg.payload)
