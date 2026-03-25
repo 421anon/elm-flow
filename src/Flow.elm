@@ -1,7 +1,7 @@
 module Flow exposing
     ( Flow
     , Program, element, document, application
-    , await, subscribe
+    , await, subscribe, subscribeWhile
     , pure, lift, liftUpdate
     , get, set, modify
     , map, andThen, join, ap, flap, compose, seq, traverse, mapM
@@ -16,22 +16,9 @@ module Flow exposing
     , ffi
     )
 
-{-| A monadic interface for _The Elm Architecture_, bridging synchronous state
-modifications with asynchronous subscriptions via Channels.
+{-| Write effectful Elm logic as composable steps — no `Msg` type, no `update` function.
 
-**Note:** This library merges concepts from two community packages:
-
-  - `chrilves/elm-io` (The free monad interface for TEA)
-  - `brian-watkins/elm-procedure` (Continuation-passing channels and subscriptions)
-
-
-## The Flow pattern
-
-In a traditional TEA application you define a central `Msg` type and an
-`update : Msg -> Model -> (Model, Cmd Msg)` function that dispatches on it.
-With `Flow` there is no separate `Msg` type and no central dispatch table.
-
-Your event handlers and subscriptions produce `Flow` values directly:
+Event handlers and subscriptions produce `Flow` values directly:
 
     -- a button click
     Html.button
@@ -40,9 +27,6 @@ Your event handlers and subscriptions produce `Flow` values directly:
 
     -- an HTTP response
     Flow.lift (Http.get { url = "/api/data", expect = Http.expectJson handleResult decoder })
-
-The runtime executes each `Flow` immediately as it arrives, keeping behaviour
-co-located with the event that triggers it.
 
 @docs Flow
 
@@ -54,7 +38,7 @@ co-located with the event that triggers it.
 
 # Subscriptions and channels
 
-@docs await, subscribe
+@docs await, subscribe, subscribeWhile
 @docs ffi
 
 
@@ -153,8 +137,8 @@ type alias Flow s a =
 
 -}
 await : Channel s a -> Flow s a
-await =
-    Flow.Channel.acceptOne
+await ch =
+    Flow.Channel.open ch (Just << Pure)
 
 
 {-| Open a channel and run the given handler for every value it produces,
@@ -168,8 +152,43 @@ indefinitely.
 
 -}
 subscribe : (a -> Flow s ()) -> Channel s a -> Flow s a
-subscribe =
-    Flow.Channel.accept
+subscribe handler ch =
+    let
+        continuation a =
+            Just (andThen (\() -> Flow.Channel.loop ch continuation) (async (handler a)))
+    in
+    Flow.Channel.open ch continuation
+
+
+{-| Like `subscribe`, but stops when the predicate returns `False`.
+The predicate receives both the current model and the incoming value, so
+cancellation can be based on model state, the value itself, or both.
+Cancellation is lazy: the check runs on each incoming message, not
+immediately when the model changes.
+
+    -- stop based on model state alone
+    Flow.subscribeWhile (\model _ -> model.listening) handleMessage myChannel
+
+    -- stop on a specific sentinel value
+    Flow.subscribeWhile (\_ msg -> msg /= "disconnect") handleMessage myChannel
+
+-}
+subscribeWhile : (s -> a -> Bool) -> (a -> Flow s ()) -> Channel s a -> Flow s a
+subscribeWhile isActive handler ch =
+    let
+        continuation a =
+            Just
+                (Get
+                    (\model ->
+                        if isActive model a then
+                            andThen (\() -> Flow.Channel.loop ch continuation) (async (handler a))
+
+                        else
+                            none
+                    )
+                )
+    in
+    Flow.Channel.open ch continuation
 
 
 {-| Lift a plain value into Flow without performing any effects.
@@ -412,7 +431,7 @@ replace rget rset =
                     Command (Cmd.map aux c)
 
                 Await req sub ->
-                    Await (\key -> Cmd.map aux (req key)) (\key -> Sub.map (Maybe.map aux) (sub key))
+                    Await req (\key -> Sub.map (Maybe.map aux) (sub key))
     in
     aux
 
@@ -867,5 +886,5 @@ ffi outPort inPort fnName encode decode payload =
                 )
                 (\key -> Cmd.map never (outPort { key = key, fn = fnName, value = encode payload }))
     in
-    Flow.Channel.acceptOne (Flow.Channel.filter (\key msg -> msg.key == key) channel)
+    await (Flow.Channel.filter (\key msg -> msg.key == key) channel)
         |> andThen (\msg -> pure msg.payload)

@@ -1,10 +1,21 @@
 # elm-flow
 
-A monadic interface for _The Elm Architecture_, bridging synchronous state modifications with asynchronous subscriptions via Channels.
+Write effectful Elm logic as composable steps.
 
-This library merges concepts from two packages:
+**Beginners:** `Flow` is a data type representing an Elm *imperative program* that can *do* things ("read/write the model", "call this API and take its return value", "wait for an incoming value on a port") and the library runs them. Your view functions return `Flow` values directly; nothing else to wire up. There is simply no `update` function.
 
-- [`chrilves/elm-io`](https://package.elm-lang.org/packages/chrilves/elm-io/latest/) — the free monad interface for TEA
+**Experts:** `Flow s` is a **free monad over state, Elm commands, subscription continuations, and concurrent fan-out**. Its constructors — `Pure`, `Get (s -> Flow s a)`, `Set s`, `Command (Cmd (Flow s a))`, `Await` (channel-keyed subscription continuation), `Batch` — form a composable algebra over Elm's runtime effects. The `Msg`/`update` dispatch layer is eliminated; an interpreter takes its place.
+
+What makes `Flow s` a monad? The fact that:
+
+- there is a `Flow.pure` function that constructs a program with no effects, simply returning a value
+- there is a `Flow.map` function that lifts a function into the program
+- there is a `Flow.join` function that allows programs returning an inner program to run that program
+- that the above three uphold trivial monad laws (such as mapping the identity function doesn't change the Flow)
+
+This library merges concepts and code from two packages:
+
+- [`chrilves/elm-io`](https://package.elm-lang.org/packages/chrilves/elm-io/latest/) — free monad interface for Elm
 - [`brian-watkins/elm-procedure`](https://github.com/brian-watkins/elm-procedure) — continuation-passing channels and subscriptions
 
 We wish to express our deep respect and heartfelt thanks to the authors of these packages.
@@ -12,22 +23,7 @@ elm-flow is largely an amalgamation of the two enabled by the generosity of thei
 publishing these under the permissive MIT and BSD-3 licenses, respectively. We hereby
 republish our entire derivative work under BSD-3.
 
-## Overview
-
-`Flow s a` is a free monad that describes a computation which can:
-
-- Read and write application state `s`
-- Fire Elm `Cmd`s and receive their results
-- Subscribe to channels (ports, WebSockets, timers, …) and resume when a value arrives
-- Run multiple branches concurrently via `Batch`
-
-The runtime interpreter (`Flow.Program`) drives these computations inside a standard TEA `update` loop, so the rest of your Elm app stays unchanged.
-
 ## Quick start
-
-With `elm-flow`, you do **not** define a custom `Msg` type or an `update` function.
-Instead, your `view` handlers and `subscriptions` emit `Flow` values directly,
-and the library runtime interprets them.
 
 ```elm
 import Flow exposing (Flow)
@@ -54,24 +50,43 @@ view model =
 
 ## Channels
 
-Channels connect external event sources (ports, WebSockets, timers) to a `Flow` pipeline. Use `Flow.Channel.connect` to build a channel from an Elm subscription port and an optional command port, then pass it to `Flow.await` (receive one value) or `Flow.subscribe` (handle values indefinitely).
+Channels connect subscriptions to a `Flow` pipeline. Use `Flow.Channel.connect` to build a channel from an Elm subscription port and an optional command port, then pass it to `Flow.await` (receive one value) or `Flow.subscribe` (handle values indefinitely).
 
 ```elm
 -- In Ports.elm
-port onMessage : (String -> msg) -> Sub msg
-port send : String -> Cmd msg
+port wsMessages : (ServerMessage -> msg) -> Sub msg
+port wsConnect  : String -> Cmd msg
 
-myChannel : Channel Model String
-myChannel =
+type ServerMessage
+    = ChatMessage String
+    | RoomEvent String
+
+-- Assumes a Model with:
+--   messages  : List String   -- lens `messages`
+--   events    : List String   -- lens `events`
+--   listening : Bool          -- lens `listening`
+
+roomChannel : String -> Channel Model ServerMessage
+roomChannel roomId =
     Flow.Channel.connect
-        (\callback -> Ports.onMessage (\s -> callback s))
-        (\_ -> Ports.send "subscribe")
+        Ports.wsMessages
+        (\_ -> Ports.wsConnect roomId)
 
-listenLoop : Flow Model ()
-listenLoop =
-    Flow.subscribe
-        (\msg -> Flow.modify (\m -> { m | lastMessage = msg }))
-        myChannel
+handleMessage : ServerMessage -> Flow Model ()
+handleMessage msg =
+    case msg of
+        ChatMessage text -> Flow.over messages ((::) text)
+        RoomEvent ev     -> Flow.over events   ((::) ev)
+
+-- Runs until `model.listening` is set to False.
+-- Cancellation is lazy: the subscription stops after the next incoming message.
+listenRoom : String -> Flow Model ()
+listenRoom roomId =
+    Flow.subscribeWhile (\model _ -> model.listening) handleMessage (roomChannel roomId)
+
+leaveRoom : Flow Model ()
+leaveRoom =
+    Flow.setAll listening False
 ```
 
 ### FFI with dynamic dispatch
@@ -137,30 +152,6 @@ runJob id =
             )
 ```
 
-### Subscribing to a server-sent event stream
-
-`subscribe` wires a channel to a handler function. When a single event carries
-multiple updates, `batchM` fans them out into concurrent branches:
-
-```elm
-listenForUpdates : Int -> Flow Model ()
-listenForUpdates roomId =
-    Flow.subscribe handleEvent (Channels.connect roomId)
-
-
-handleEvent : ServerMessage -> Flow Model ()
-handleEvent msg =
-    case msg of
-        Snapshot items ->
-            -- apply every item update as a concurrent branch
-            Flow.batchM (List.map applyUpdate items)
-
-        Heartbeat ->
-            Flow.pure ()
-
-        Error text ->
-            showToast text
-```
 
 ## Optics helpers
 
@@ -170,7 +161,7 @@ that reads like imperative mutation — but the result is a pure value, a data
 structure that can be passed around, combined, and transformed before a single
 effect ever runs.
 
-We recommend watching the recording of a talk by Edward Kmett titled "Lenses: A Functional Imperative"
+We recommend watching the recording of a talk by Edward Kmett titled "Lenses: A Functional Imperative".
 
 The optics helpers (`try`, `forAll`, `over`, `setAll`, `via`) work with
 [`erlandsona/elm-accessors`](https://package.elm-lang.org/packages/erlandsona/elm-accessors/latest/)
@@ -182,8 +173,6 @@ type alias Model =
     }
 
 -- Lenses: user, name, email, loginCount (defined once, composed with <<)
--- <...>
---
 
 recordLogin : String -> String -> Flow Model ()
 recordLogin newName newEmail =
@@ -209,24 +198,25 @@ Flow.via user normaliseUser
 ## API quick reference
 
 **Core** —
-`pure` (lift a value),
-`lift` (lift a `Cmd`),
-`get` / `set` / `modify` (read and write the model),
-`andThen` / `map` (sequence and transform),
-`batch` / `batchM` (run multiple branches),
-`none` (terminate / no-op).
+- `pure` (lift a value),
+- `lift` (lift a `Cmd`),
+- `get` / `set` / `modify` (read and write the model),
+- `andThen` / `map` (sequence and transform),
+- `batch` / `batchM` (run multiple branches),
+- `none` (terminate / no-op).
 
 **Async** —
-`await` (suspend until a Channel delivers one value),
-`subscribe` (handle every value indefinitely),
-`yield` (force a render cycle before continuing),
-`async` (fire-and-forget a sub-computation).
+- `await` (suspend until a Channel delivers one value),
+- `subscribe` (handle every value indefinitely),
+- `subscribeWhile` (handle values while a predicate holds),
+- `yield` (force a render cycle before continuing),
+- `async` (fire-and-forget a sub-computation).
 
 **Control flow** —
-`when` (conditional execution),
-`bracket_` (acquire/release resources),
-`setting` (hold a `Bool` lens `True` for a computation),
-`locking` (skip if a `Bool` lens is already `True`).
+- `when` (conditional execution),
+- `bracket_` (acquire/release resources),
+- `setting` (hold a `Bool` lens `True` for a computation),
+- `locking` (skip if a `Bool` lens is already `True`).
 
 ## License
 
