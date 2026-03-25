@@ -886,5 +886,5 @@ ffi outPort inPort fnName encode decode payload =
                 )
                 (\key -> Cmd.map never (outPort { key = key, fn = fnName, value = encode payload }))
     in
-    Flow.Channel.acceptOne (Flow.Channel.filter (\key msg -> msg.key == key) channel)
+    await (Flow.Channel.filter (\key msg -> msg.key == key) channel)
         |> andThen (\msg -> pure msg.payload)
