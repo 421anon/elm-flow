@@ -3,7 +3,7 @@
     "name": "421anon/elm-flow",
     "summary": "A monadic interface for The Elm Architecture with async channels",
     "license": "BSD-3-Clause",
-    "version": "2.1.0",
+    "version": "3.0.0",
     "exposed-modules": [
         "Flow",
         "Flow.Channel"
