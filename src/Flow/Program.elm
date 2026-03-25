@@ -93,7 +93,7 @@ runUserUpdate flow state registry =
                                 , channels = Dict.insert channelId (Sub.map wrapMsg (sub key)) reg.channels
                             }
                     in
-                    ( m, newRegistry, Cmd.map UserFlow (req key) )
+                    ( m, newRegistry, Cmd.map never (req key) )
     in
     recur flow state registry
 

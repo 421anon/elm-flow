@@ -7,7 +7,7 @@ type Flow s a
     | Set s (Flow s a)
     | Batch (List (Flow s a))
     | Command (Cmd (Flow s a))
-    | Await (ChannelKey -> Cmd (Flow s a)) (ChannelKey -> Sub (Maybe (Flow s a)))
+    | Await (ChannelKey -> Cmd Never) (ChannelKey -> Sub (Maybe (Flow s a)))
 
 
 type alias ChannelKey =
@@ -44,5 +44,5 @@ andThen f flow =
 
         Await req sub ->
             Await
-                (\key -> Cmd.map (andThen f) (req key))
+                req
                 (\key -> Sub.map (Maybe.map (andThen f)) (sub key))

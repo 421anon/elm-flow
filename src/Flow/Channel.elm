@@ -1,23 +1,22 @@
 module Flow.Channel exposing
     ( Channel
     , connect, join, filter
-    , accept, acceptOne, acceptUntil
+    , open, loop
     )
 
 {-| Channel primitives for connecting external event sources to `Flow`.
 
 Use `connect` when you have both a subscription source and a command to
 kick off the channel, or `join` when subscriptions alone are enough.
-Then consume events with `Flow.await` (one event), `Flow.Channel.acceptUntil`
-(events until a condition), or `Flow.subscribe` (all events indefinitely).
+Then consume events with `Flow.await`, `Flow.subscribe`, or `Flow.subscribeWhile`.
 
 @docs Channel
 @docs connect, join, filter
-@docs accept, acceptOne, acceptUntil
+@docs open, loop
 
 -}
 
-import Flow.Internal exposing (Flow(..), andThen, async)
+import Flow.Internal exposing (Flow(..))
 
 
 {-| Per-subscription key passed to channel ports.
@@ -35,7 +34,7 @@ type alias ChannelKey =
 -}
 type Channel s a
     = Channel
-        { cmdPort : ChannelKey -> Cmd (Flow s a)
+        { cmdPort : ChannelKey -> Cmd Never
         , subPort : ChannelKey -> (a -> Maybe (Flow s a)) -> Sub (Maybe (Flow s a))
         }
 
@@ -46,7 +45,6 @@ attaches it. The command is fired once when the channel is first awaited.
     -- Port declarations:
     --   port onMessage : (String -> msg) -> Sub msg
     --   port subscribe : String -> Cmd msg
-
     myChannel : Channel Model String
     myChannel =
         Flow.Channel.connect
@@ -54,7 +52,7 @@ attaches it. The command is fired once when the channel is first awaited.
             (\_ -> Ports.subscribe "myTopic")
 
 -}
-connect : ((a -> Maybe (Flow s a)) -> Sub (Maybe (Flow s a))) -> (ChannelKey -> Cmd (Flow s a)) -> Channel s a
+connect : ((a -> Maybe (Flow s a)) -> Sub (Maybe (Flow s a))) -> (ChannelKey -> Cmd Never) -> Channel s a
 connect subPort cmdPort =
     Channel
         { cmdPort = cmdPort
@@ -66,7 +64,6 @@ connect subPort cmdPort =
 
     -- Port declaration:
     --   port onKeyDown : (String -> msg) -> Sub msg
-
     keyChannel : Channel Model String
     keyChannel =
         Flow.Channel.join (\callback -> Ports.onKeyDown callback)
@@ -106,65 +103,26 @@ filter predicate (Channel channel) =
         }
 
 
-awaitWith : (ChannelKey -> Cmd (Flow s a)) -> Channel s a -> (a -> Maybe (Flow s a)) -> Flow s a
-awaitWith cmd (Channel channel) callback =
+{-| Fire the channel's setup command and suspend until the first value arrives.
+The callback decides what to do next: `Just flow` to continue, `Nothing` to
+close the subscription.
+
+This is the low-level primitive that `Flow.await` and `Flow.subscribe` are
+built on. Prefer those unless you need custom continuation logic.
+
+-}
+open : Channel s a -> (a -> Maybe (Flow s a)) -> Flow s a
+open (Channel channel) callback =
     Await
-        (\key -> Cmd.map (\_ -> Batch []) (cmd key))
+        channel.cmdPort
         (\key -> channel.subPort key callback)
 
 
-{-| Subscribe to a channel and run the handler for every incoming event,
-indefinitely. The subscription runs for the lifetime of the program with
-no built-in way to stop it.
-
-    listenForever : Flow Model ()
-    listenForever =
-        Flow.Channel.accept
-            (\msg -> Flow.modify (\m -> { m | lastMessage = msg }))
-            myChannel
-
+{-| Re-register on an already-open channel without firing the setup command again.
+Used to loop inside a subscription after the channel has been opened with `open`.
 -}
-accept : (a -> Flow s ()) -> Channel s a -> Flow s a
-accept handler ((Channel channel) as ch) =
-    let
-        continuation a =
-            Just (andThen loop (async (handler a)))
-
-        loop () =
-            awaitWith (\_ -> Cmd.none) ch continuation
-    in
-    awaitWith channel.cmdPort ch continuation
-
-
-{-| Wait for events from a channel, discarding each one until the predicate
-returns `True`. Returns the first event that satisfies the predicate and
-then closes the channel.
-
-    -- wait until the server sends "done"
-    Flow.Channel.acceptUntil (\msg -> msg == "done") myChannel
-
--}
-acceptUntil : (a -> Bool) -> Channel s a -> Flow s a
-acceptUntil shouldStop ((Channel channel) as ch) =
-    awaitWith channel.cmdPort
-        ch
-        (\a ->
-            if shouldStop a then
-                Just (Pure a)
-
-            else
-                Just (acceptUntil shouldStop ch)
-        )
-
-
-{-| Wait for the next single event from a channel and return it. The channel
-is closed after the first event arrives.
-
-    -- read one message then continue
-    Flow.Channel.acceptOne myChannel
-        |> Flow.andThen (\msg -> Flow.modify (\m -> { m | lastMessage = msg }))
-
--}
-acceptOne : Channel s a -> Flow s a
-acceptOne =
-    acceptUntil (always True)
+loop : Channel s a -> (a -> Maybe (Flow s a)) -> Flow s a
+loop (Channel channel) callback =
+    Await
+        (\_ -> Cmd.none)
+        (\key -> channel.subPort key callback)
