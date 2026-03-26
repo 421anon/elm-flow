@@ -2,6 +2,7 @@ module Flow exposing
     ( Flow
     , Program, element, document, application
     , await, subscribe, subscribeWhile
+    , ffi
     , pure, lift, liftUpdate
     , get, set, modify
     , map, andThen, join, ap, flap, compose, seq, traverse, mapM
@@ -10,13 +11,12 @@ module Flow exposing
     , yield, forceRendering
     , batch, batchM
     , assertJust, assertOk, assertCondition, fromMaybe
-    , attemptTask
+    , performTask, attemptTask, attemptTaskWith
     , try, forAll, getAll, over, setAll, via
     , when, return, async, bracket_, setting, locking
-    , ffi
     )
 
-{-| Write effectful Elm logic as composable steps — no `Msg` type, no `update` function.
+{-| Write effectful Elm logic as composable steps - no `Msg` type, no `update` function.
 
 Event handlers and subscriptions produce `Flow` values directly:
 
@@ -84,7 +84,7 @@ Event handlers and subscriptions produce `Flow` values directly:
 
 # Task helpers
 
-@docs attemptTask
+@docs performTask, attemptTask, attemptTaskWith
 
 
 # Optics helpers
@@ -114,12 +114,6 @@ import Url exposing (Url)
 
 {-| A description of a computation that can read and write state `s` and
 eventually produces a value of type `a`.
-
-`Flow` is a free monad: values of this type are data structures that the
-runtime interprets, rather than functions that run immediately. This makes
-it possible to batch, sequence, and transform computations before any
-side-effects take place.
-
 -}
 type alias Flow s a =
     Flow.Internal.Flow s a
@@ -308,7 +302,7 @@ ap mf ma =
     andThen (\y -> map y ma) mf
 
 
-{-| Flipped `ap` — apply a value to a function, both wrapped in Flow.
+{-| Flipped `ap`. Apply a value to a function, both wrapped in Flow.
 
     Flow.pure 41
         |> Flow.flap (Flow.pure (\n -> n + 1))
@@ -345,8 +339,12 @@ seq second first =
     first |> andThen (\_ -> second)
 
 
-{-| The empty computation — terminates the current branch without producing a
-value or changing state. Use this as the natural end-point of a pipeline.
+{-| The empty computation. Terminates the current branch without producing a
+value or changing state.
+
+**WARNING:** `none` is a 0-threaded program - it has no active thread to carry
+a continuation forward. Chaining it with `andThen`, `seq`, etc. produces
+another 0-threaded program, so those continuations will never run.
 
     Flow.get
         |> Flow.andThen
@@ -368,7 +366,10 @@ none =
 independently; the continuation (via `andThen`) is invoked once per branch
 with that branch's individual result.
 
-Use `mapM` instead if you want the results collected into a `List`.
+**WARNING:** `batchM` multiplies the number of threads by the number of continuations.
+If you wish to extend a multi-threaded Flow on a single branch, consider [`async`](#async).
+
+Use [`mapM`](#mapM) instead if you want the results collected into a `List`.
 
     -- fire three notifications in parallel
     Flow.batchM [ notifyAlice, notifyBob, notifyCarol ]
@@ -666,6 +667,17 @@ fromMaybe m f =
     pure m |> assertJust |> andThen f
 
 
+{-| Run an infallible `Task` and produce its result.
+
+    Flow.performTask (Task.succeed 42)
+        |> Flow.andThen (\n -> Flow.modify (\m -> { m | count = n }))
+
+-}
+performTask : Task Never a -> Flow s a
+performTask t =
+    lift (Task.perform identity t)
+
+
 {-| Fire a `Task` for its side-effects and ignore the result (both `Ok` and
 `Err` are discarded). Useful for fire-and-forget operations such as writing
 to `localStorage` via a port task.
@@ -678,10 +690,29 @@ attemptTask t =
     lift (Task.attempt (always ()) t)
 
 
+{-| Run a `Task` and feed its `Result` into a continuation.
+
+    Flow.attemptTaskWith
+        (\result ->
+            case result of
+                Ok data ->
+                    Flow.modify (\m -> { m | data = data })
+
+                Err err ->
+                    Flow.modify (\m -> { m | error = Just err })
+        )
+        (Http.task { ... })
+
+-}
+attemptTaskWith : (Result e a -> Flow s b) -> Task e a -> Flow s b
+attemptTaskWith handler t =
+    lift (Task.attempt identity t) |> andThen handler
+
+
 {-| Read a value through an optic. Produces `Just a` if the optic matches,
 `Nothing` if it does not (e.g. a `Prism` pointing at the wrong variant).
 
-    Flow.try MyModel.selectedItem
+    Flow.try MyLenses.selectedItem
         (\maybeItem ->
             case maybeItem of
                 Just item ->
@@ -697,11 +728,12 @@ try optic f =
     get |> map (Accessors.try optic) |> andThen f
 
 
-{-| Read a value through an optic, terminating with `none` if the optic does
-not match.
+{-| Read all matching values through an optic on separate threads,
+terminating with `none` if the optic does not match.
 
-    Flow.forAll MyModel.selectedItem
-        (\item -> renderItem item)
+    -- Only runs if a user is logged in
+    Flow.forAll MyLenses.currentUser
+        (\user -> showWelcomeBanner user.name)
 
 -}
 forAll : An_Optic pr ls s a -> (a -> Flow s b) -> Flow s b
@@ -711,7 +743,7 @@ forAll optic f =
 
 {-| Read all values targeted by an optic (useful for traversals).
 
-    Flow.getAll MyModel.allItems
+    Flow.getAll MyLenses.allItems
         (\items -> Flow.pure (List.length items))
 
 -}
@@ -722,7 +754,7 @@ getAll optic f =
 
 {-| Modify the value(s) targeted by an optic.
 
-    Flow.over MyModel.count (\n -> n + 1)
+    Flow.over MyLenses.count (\n -> n + 1)
 
 -}
 over : An_Optic pr ls s a -> (a -> a) -> Flow s ()
@@ -732,7 +764,7 @@ over =
 
 {-| Set the value(s) targeted by an optic.
 
-    Flow.setAll MyModel.status Loading
+    Flow.setAll MyLenses.status Loading
 
 -}
 setAll : An_Optic pr ls s a -> a -> Flow s ()
@@ -740,15 +772,25 @@ setAll =
     (>>) always << over
 
 
-{-| Run a `Flow a x` in the context of a larger model `s`, using an optic to
-zoom in and out. State reads and writes inside the sub-flow are applied through
-the optic.
+{-| Embed a `Flow inner a` into a larger model `outer` through an optic. All state
+reads and writes inside the sub-flow are transparently routed through the optic.
 
-    Flow.via MyModel.editingRecord
-        (Flow.modify (\r -> { r | name = newName }))
+This is the primary tool for reusable components: write a self-contained `Flow`
+against a sub-model type, then embed it anywhere that sub-model appears by
+passing in the appropriate optic.
+
+    -- SelectState is a reusable component with its own Flow logic
+    handleArrowDown : Flow SelectState ()
+    handleArrowDown =
+        Flow.get
+            |> Flow.map (get activeIndex)
+            |> Flow.andThen (\i -> Flow.modify (set activeIndex (i + 1)))
+
+    -- Embed it into the parent model through a lens
+    Flow.via MyLenses.selectState handleArrowDown
 
 -}
-via : An_Optic pr ls s a -> Flow a x -> Flow s x
+via : An_Optic pr ls outer inner -> Flow inner a -> Flow outer a
 via optic =
     replace
         (get |> andThen (batchM << List.map pure << Accessors.all optic))
@@ -769,8 +811,7 @@ when pred io =
         pure ()
 
 
-{-| Run a Flow for its effects, then produce a fixed value `a` regardless of
-what the flow returned.
+{-| Shorthand for \`Flow.seq (Flow.pure a).
 
     saveRecord
         |> Flow.return "saved"
@@ -794,8 +835,12 @@ async =
     Flow.Internal.async
 
 
-{-| Acquire a resource, run a computation, then release the resource —
-even if the computation terminates early with `none`.
+{-| Acquire a resource, run a computation, then release the resource.
+
+**WARNING:** If the computation forks into multiple threads, the
+release step will run once per thread. This also means that if the
+computation is terminating (which is equivalent to forking into 0 threads),
+then the release step will NOT run.
 
     Flow.bracket_
         (Flow.modify (\m -> { m | loading = True }))
@@ -811,7 +856,7 @@ bracket_ before after thing =
 {-| Set a `Bool` field to `True` for the duration of a computation, then
 restore it to `False`. Useful for loading/busy flags.
 
-    Flow.setting MyModel.isLoading fetchData
+    Flow.setting MyLenses.isLoading fetchData
 
 -}
 setting : An_Optic pr ls s Bool -> Flow s a -> Flow s a
@@ -823,7 +868,7 @@ setting lns =
 it at `True` for the duration. Subsequent calls while the lock is held are
 silently dropped.
 
-    Flow.locking MyModel.isSaving saveRecord
+    Flow.locking MyLenses.isSaving saveRecord
 
 -}
 locking : A_Lens pr s Bool -> Flow s () -> Flow s ()
@@ -839,7 +884,11 @@ the return value. Under the hood, this helper uses a unique string key to automa
 match JavaScript responses back to the correct `Flow` request.
 
     -- 1. Define one pair of ports
+
+
+
     port ffiOut : { key : String, fn : String, value : Json.Encode.Value } -> Cmd msg
+
     port ffiIn : ({ key : String, value : Json.Decode.Value } -> msg) -> Sub msg
 
     -- 2. Wire them into a helper
@@ -860,6 +909,7 @@ match JavaScript responses back to the correct `Flow` request.
     --         app.ports.ffiIn.send({ key: req.key, value: data });
     --     }
     -- });
+
 -}
 ffi :
     ({ key : String, fn : String, value : Json.Encode.Value } -> Cmd Never)

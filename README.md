@@ -2,9 +2,9 @@
 
 Write effectful Elm logic as composable steps.
 
-**Beginners:** `Flow` is a data type representing an Elm *imperative program* that can *do* things ("read/write the model", "call this API and take its return value", "wait for an incoming value on a port") and the library runs them. Your view functions return `Flow` values directly; nothing else to wire up. There is simply no `update` function.
+**Beginners:** `Flow` is a data type representing an Elm *imperative program* that can *do* things ("read/write the model", "call this API and take its return value", "wait for an incoming value on a port") and the library runs them. Your views emit `Flow` values as messages; nothing else to wire up. There is simply no `update` function.
 
-**Experts:** `Flow s` is a **free monad over state, Elm commands, subscription continuations, and concurrent fan-out**. Its constructors — `Pure`, `Get (s -> Flow s a)`, `Set s`, `Command (Cmd (Flow s a))`, `Await` (channel-keyed subscription continuation), `Batch` — form a composable algebra over Elm's runtime effects. The `Msg`/`update` dispatch layer is eliminated; an interpreter takes its place.
+**Experts:** `Flow s` is a **free monad over state, Elm commands, subscription continuations, and concurrent fan-out**. Its constructors - `Pure`, `Get (s -> Flow s a)`, `Set s`, `Command (Cmd (Flow s a))`, `Await` (channel-keyed subscription continuation), `Batch` - form a composable algebra over Elm's runtime effects. The `Msg`/`update` dispatch layer is eliminated; an interpreter takes its place.
 
 What makes `Flow s` a monad? The fact that:
 
@@ -15,8 +15,8 @@ What makes `Flow s` a monad? The fact that:
 
 This library merges concepts and code from two packages:
 
-- [`chrilves/elm-io`](https://package.elm-lang.org/packages/chrilves/elm-io/latest/) — free monad interface for Elm
-- [`brian-watkins/elm-procedure`](https://github.com/brian-watkins/elm-procedure) — continuation-passing channels and subscriptions
+- [`chrilves/elm-io`](https://package.elm-lang.org/packages/chrilves/elm-io/latest/) - free monad interface for Elm
+- [`brian-watkins/elm-procedure`](https://github.com/brian-watkins/elm-procedure) - continuation-passing channels and subscriptions
 
 We wish to express our deep respect and heartfelt thanks to the authors of these packages.
 elm-flow is largely an amalgamation of the two enabled by the generosity of their authors,
@@ -127,7 +127,7 @@ app.ports.ffiOut.subscribe(async (req) => {
 
 ### Async action with state preparation and error recovery
 
-Read state, do preparatory work, fire a command, recover on failure — all in a
+Read state, do preparatory work, fire a command, recover on failure - all in a
 single linear pipeline with no `Msg` variants or pattern-match dispatch:
 
 ```elm
@@ -156,10 +156,8 @@ runJob id =
 ## Optics helpers
 
 Lenses give you composable read/write paths into nested data. The state monad
-gives you sequenced reads and writes. Put them together and you get something
-that reads like imperative mutation — but the result is a pure value, a data
-structure that can be passed around, combined, and transformed before a single
-effect ever runs.
+gives you sequenced reads and writes. Put them together and you get a Flow
+that reads like imperative mutation.
 
 We recommend watching the recording of a talk by Edward Kmett titled "Lenses: A Functional Imperative".
 
@@ -197,26 +195,49 @@ Flow.via user normaliseUser
 
 ## API quick reference
 
-**Core** —
-- `pure` (lift a value),
-- `lift` (lift a `Cmd`),
-- `get` / `set` / `modify` (read and write the model),
-- `andThen` / `map` (sequence and transform),
-- `batch` / `batchM` (run multiple branches),
-- `none` (terminate / no-op).
+**Core**
+- [`pure`](./Flow#pure) (lift a value),
+- [`lift`](./Flow#lift) (lift a `Cmd`),
+- [`get`](./Flow#get) / [`set`](./Flow#set) / [`modify`](./Flow#modify) (read and write the model),
+- [`andThen`](./Flow#andThen) / [`map`](./Flow#map) / [`seq`](./Flow#seq) (sequence and transform),
+- [`batch`](./Flow#batch) / [`batchM`](./Flow#batchM) (run multiple branches),
+- [`none`](./Flow#none) (terminate the current branch).
 
-**Async** —
-- `await` (suspend until a Channel delivers one value),
-- `subscribe` (handle every value indefinitely),
-- `subscribeWhile` (handle values while a predicate holds),
-- `yield` (force a render cycle before continuing),
-- `async` (fire-and-forget a sub-computation).
+**Async**
+- [`await`](./Flow#await) (suspend until a Channel delivers one value),
+- [`subscribe`](./Flow#subscribe) (handle every value indefinitely),
+- [`subscribeWhile`](./Flow#subscribeWhile) (handle values while a predicate holds),
+- [`yield`](./Flow#yield) (force a render cycle before continuing),
+- [`async`](./Flow#async) (fire-and-forget a sub-computation).
 
-**Control flow** —
-- `when` (conditional execution),
-- `bracket_` (acquire/release resources),
-- `setting` (hold a `Bool` lens `True` for a computation),
-- `locking` (skip if a `Bool` lens is already `True`).
+**Control flow**
+- [`when`](./Flow#when) (conditional execution),
+- [`return`](./Flow#return) (run a Flow for its effects, then produce a fixed value),
+- [`bracket_`](./Flow#bracket_) (acquire/release resources),
+- [`setting`](./Flow#setting) (hold a `Bool` lens `True` for a computation),
+- [`locking`](./Flow#locking) (skip if a `Bool` lens is already `True`).
+
+**Assertions**
+- [`assertJust`](./Flow#assertJust) (terminate if `Nothing`),
+- [`assertOk`](./Flow#assertOk) (terminate if `Err`),
+- [`assertCondition`](./Flow#assertCondition) (terminate if predicate fails),
+- [`fromMaybe`](./Flow#fromMaybe) (unwrap a `Maybe` or terminate).
+
+**Tasks**
+- [`performTask`](./Flow#performTask) (run an infallible `Task`),
+- [`attemptTask`](./Flow#attemptTask) (fire-and-forget a fallible `Task`),
+- [`attemptTaskWith`](./Flow#attemptTaskWith) (run a fallible `Task` and handle the `Result`).
+
+**Optics**
+- [`try`](./Flow#try) (read through an optic, producing `Just` or `Nothing`),
+- [`forAll`](./Flow#forAll) (read through an optic, terminating if it does not match),
+- [`getAll`](./Flow#getAll) (read all values targeted by a traversal),
+- [`over`](./Flow#over) (modify value(s) through an optic),
+- [`setAll`](./Flow#setAll) (set value(s) through an optic),
+- [`via`](./Flow#via) (zoom a sub-`Flow` into a larger model through an optic).
+
+**FFI**
+- [`ffi`](./Flow#ffi) (call a JavaScript function by name through a single port pair).
 
 ## License
 
