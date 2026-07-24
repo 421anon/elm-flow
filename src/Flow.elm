@@ -728,8 +728,7 @@ try optic f =
     get |> map (Accessors.try optic) |> andThen f
 
 
-{-| Read all matching values through an optic on separate threads,
-terminating with `none` if the optic does not match.
+{-| Fork into n concurrent threads for each matching value through an optic.
 
     -- Only runs if a user is logged in
     Flow.forAll MyLenses.currentUser
@@ -738,7 +737,7 @@ terminating with `none` if the optic does not match.
 -}
 forAll : An_Optic pr ls s a -> (a -> Flow s b) -> Flow s b
 forAll optic f =
-    get |> map (Accessors.try optic) |> assertJust |> andThen f
+    get |> andThen (Accessors.all optic >> List.map f >> batchM)
 
 
 {-| Read all values targeted by an optic (useful for traversals).
