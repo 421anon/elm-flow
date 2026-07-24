@@ -13,7 +13,8 @@ module Flow exposing
     , assertJust, assertOk, assertCondition, fromMaybe
     , performTask, attemptTask, attemptTaskWith
     , try, forAll, getAll, over, setAll, via
-    , when, return, async, bracket_, setting, locking
+    , ifHas, whenHas, unlessHas
+    , when, unless, if_, return, async, bracket_, setting, locking
     )
 
 {-| Write effectful Elm logic as composable steps - no `Msg` type, no `update` function.
@@ -86,15 +87,13 @@ Event handlers and subscriptions produce `Flow` values directly:
 
 @docs performTask, attemptTask, attemptTaskWith
 
-
-# Optics helpers
-
 @docs try, forAll, getAll, over, setAll, via
+@docs ifHas, whenHas, unlessHas
 
 
 # Control flow
 
-@docs when, return, async, bracket_, setting, locking
+@docs if_, when, unless, return, async, bracket_, setting, locking
 
 -}
 
@@ -796,6 +795,66 @@ via optic =
         (setAll optic)
 
 
+{-| Branch on whether an optic matches: run `onPresent` with the matched value
+when the optic succeeds, `onAbsent` otherwise. Exactly one branch runs.
+
+    Flow.ifHas
+        (currentProject << success)
+        openStream
+        closeStream
+
+-}
+ifHas : An_Optic pr ls s a -> (a -> Flow s b) -> Flow s b -> Flow s b
+ifHas optic onPresent onAbsent =
+    try optic
+        (\maybeA ->
+            case maybeA of
+                Just a ->
+                    onPresent a
+
+                Nothing ->
+                    onAbsent
+        )
+
+
+{-| Run a Flow only when an optic matches. No match produces `Flow.pure ()`.
+
+    Flow.whenHas (currentProject << success) openStream
+
+-}
+whenHas : An_Optic pr ls s a -> (a -> Flow s ()) -> Flow s ()
+whenHas optic onPresent =
+    ifHas optic onPresent (pure ())
+
+
+{-| Run a Flow only when an optic does NOT match. A match produces `Flow.pure ()`.
+
+    Flow.unlessHas (currentProject << success) handleMissingProject
+
+-}
+unlessHas : An_Optic pr ls s a -> Flow s () -> Flow s ()
+unlessHas optic onAbsent =
+    ifHas optic (\_ -> pure ()) onAbsent
+
+
+{-| Branch on a `Bool`: run `onTrue` when the condition holds, `onFalse` otherwise.
+
+Exactly one branch runs.
+
+    Flow.if_ model.isLoggedIn
+        loadDashboard
+        redirectToLogin
+
+-}
+if_ : Bool -> Flow s a -> Flow s a -> Flow s a
+if_ cond onTrue onFalse =
+    if cond then
+        onTrue
+
+    else
+        onFalse
+
+
 {-| Run a Flow only when the condition is `True`, otherwise produce `()`.
 
     Flow.when model.isLoggedIn savePreferences
@@ -808,6 +867,20 @@ when pred io =
 
     else
         pure ()
+
+
+{-| Run a Flow only when the condition is `False`, otherwise produce `()`.
+
+    Flow.unless model.isCached fetchFromServer
+
+-}
+unless : Bool -> Flow s () -> Flow s ()
+unless cond io =
+    if cond then
+        pure ()
+
+    else
+        io
 
 
 {-| Shorthand for \`Flow.seq (Flow.pure a).
