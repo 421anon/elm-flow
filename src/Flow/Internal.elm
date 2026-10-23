@@ -1,4 +1,4 @@
-module Flow.Internal exposing (ChannelKey, Flow(..), andThen, async, none)
+module Flow.Internal exposing (ChannelKey, ChannelRequest(..), Flow(..), andThen, async, none)
 
 
 type Flow s a
@@ -7,7 +7,12 @@ type Flow s a
     | Set s (Flow s a)
     | Batch (List (Flow s a))
     | Command (Cmd (Flow s a))
-    | Await (ChannelKey -> Cmd Never) (ChannelKey -> Sub (Maybe (Flow s a)))
+    | Await ChannelRequest (ChannelKey -> Sub (Maybe (Flow s a)))
+
+
+type ChannelRequest
+    = Open (ChannelKey -> Cmd Never)
+    | Resume ChannelKey
 
 
 type alias ChannelKey =

@@ -66,7 +66,7 @@ type ServerMessage
 --   events    : List String   -- lens `events`
 --   listening : Bool          -- lens `listening`
 
-roomChannel : String -> Channel Model ServerMessage
+roomChannel : String -> ChannelSpec Model ServerMessage
 roomChannel roomId =
     Flow.Channel.connect
         Ports.wsMessages

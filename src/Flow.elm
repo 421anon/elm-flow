@@ -100,7 +100,7 @@ Event handlers and subscriptions produce `Flow` values directly:
 import Accessors exposing (A_Lens, A_Prism, An_Optic)
 import Browser exposing (Document, UrlRequest)
 import Browser.Navigation exposing (Key)
-import Flow.Channel exposing (Channel)
+import Flow.Channel exposing (ChannelSpec)
 import Flow.Internal exposing (..)
 import Flow.Program
 import Html exposing (Html)
@@ -118,7 +118,7 @@ type alias Flow s a =
     Flow.Internal.Flow s a
 
 
-{-| Suspend this Flow pipeline, open a Channel, and resume when a value arrives.
+{-| Suspend this Flow pipeline, open a channel from the spec, and resume when a value arrives.
 
     type alias Model =
         { latestMessage : String }
@@ -129,9 +129,9 @@ type alias Flow s a =
             |> Flow.andThen (\msg -> Flow.modify (\m -> { m | latestMessage = msg }))
 
 -}
-await : Channel s a -> Flow s a
+await : ChannelSpec s a -> Flow s a
 await ch =
-    Flow.Channel.open ch (Just << Pure)
+    Flow.Channel.open ch (\_ -> Just << Pure)
 
 
 {-| Open a channel and run the given handler for every value it produces,
@@ -144,11 +144,11 @@ indefinitely.
             myChannel
 
 -}
-subscribe : (a -> Flow s ()) -> Channel s a -> Flow s a
+subscribe : (a -> Flow s ()) -> ChannelSpec s a -> Flow s a
 subscribe handler ch =
     let
-        continuation a =
-            Just (andThen (\() -> Flow.Channel.loop ch continuation) (async (handler a)))
+        continuation channel a =
+            Just (andThen (\() -> Flow.Channel.next channel (continuation channel)) (async (handler a)))
     in
     Flow.Channel.open ch continuation
 
@@ -166,15 +166,15 @@ immediately when the model changes.
     Flow.subscribeWhile (\_ msg -> msg /= "disconnect") handleMessage myChannel
 
 -}
-subscribeWhile : (s -> a -> Bool) -> (a -> Flow s ()) -> Channel s a -> Flow s a
+subscribeWhile : (s -> a -> Bool) -> (a -> Flow s ()) -> ChannelSpec s a -> Flow s a
 subscribeWhile isActive handler ch =
     let
-        continuation a =
+        continuation channel a =
             Just
                 (Get
                     (\model ->
                         if isActive model a then
-                            andThen (\() -> Flow.Channel.loop ch continuation) (async (handler a))
+                            andThen (\() -> Flow.Channel.next channel (continuation channel)) (async (handler a))
 
                         else
                             none

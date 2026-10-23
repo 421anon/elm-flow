@@ -8,7 +8,7 @@ module Flow.Program exposing
     )
 
 import Dict exposing (Dict)
-import Flow.Internal exposing (Flow(..), none)
+import Flow.Internal exposing (ChannelRequest(..), Flow(..), none)
 
 
 type alias Model flow =
@@ -71,13 +71,22 @@ runUserUpdate flow state registry =
                 Command cmd ->
                     ( m, reg, Cmd.map UserFlow cmd )
 
-                Await req sub ->
+                Await request sub ->
                     let
                         channelId =
                             reg.nextId
 
-                        key =
-                            "Channel-" ++ String.fromInt channelId
+                        ( key, cmd ) =
+                            case request of
+                                Open open ->
+                                    let
+                                        fresh =
+                                            "Channel-" ++ String.fromInt channelId
+                                    in
+                                    ( fresh, open fresh )
+
+                                Resume existing ->
+                                    ( existing, Cmd.none )
 
                         wrapMsg mFired =
                             case mFired of
@@ -93,7 +102,7 @@ runUserUpdate flow state registry =
                                 , channels = Dict.insert channelId (Sub.map wrapMsg (sub key)) reg.channels
                             }
                     in
-                    ( m, newRegistry, Cmd.map never (req key) )
+                    ( m, newRegistry, Cmd.map never cmd )
     in
     recur flow state registry
 
@@ -109,14 +118,15 @@ runtimeUpdate runtimeMsg ( userModel, registry ) =
             ( ( newModel, newRegistry ), cmd )
 
         Unsubscribe channelId flow ->
-            let
-                newRegistry =
-                    { registry | channels = Dict.remove channelId registry.channels }
+            if Dict.member channelId registry.channels then
+                let
+                    ( newModel, finalRegistry, cmd ) =
+                        runUserUpdate flow userModel { registry | channels = Dict.remove channelId registry.channels }
+                in
+                ( ( newModel, finalRegistry ), cmd )
 
-                ( newModel, finalRegistry, cmd ) =
-                    runUserUpdate flow userModel newRegistry
-            in
-            ( ( newModel, finalRegistry ), cmd )
+            else
+                ( ( userModel, registry ), Cmd.none )
 
 
 subscriptions : (model -> Sub (Flow s a)) -> ( model, Model (Flow s a) ) -> Sub (RuntimeMsg (Flow s a))
