@@ -1,5 +1,7 @@
 module Flow.Internal exposing (ChannelKey, ChannelRequest(..), Flow(..), andThen, async, none)
 
+import Json.Encode exposing (Value)
+
 
 type Flow s a
     = Pure a
@@ -8,6 +10,8 @@ type Flow s a
     | Batch (List (Flow s a))
     | Command (Cmd (Flow s a))
     | Await ChannelRequest (ChannelKey -> Sub (Maybe (Flow s a)))
+    | Gather (List Value -> Flow s a) (Flow s a)
+    | Deliver Value
 
 
 type ChannelRequest
@@ -51,3 +55,9 @@ andThen f flow =
             Await
                 req
                 (\key -> Sub.map (Maybe.map (andThen f)) (sub key))
+
+        Gather continue branches ->
+            Gather (continue >> andThen f) (andThen f branches)
+
+        Deliver value ->
+            Deliver value

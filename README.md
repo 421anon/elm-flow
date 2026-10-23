@@ -4,7 +4,7 @@ Write effectful Elm logic as composable steps.
 
 **Beginners:** `Flow` is a data type representing an Elm *imperative program* that can *do* things ("read/write the model", "call this API and take its return value", "wait for an incoming value on a port") and the library runs them. Your views emit `Flow` values as messages; nothing else to wire up. There is simply no `update` function.
 
-**Experts:** `Flow s` is a **free monad over state, Elm commands, subscription continuations, and concurrent fan-out**. Its constructors - `Pure`, `Get (s -> Flow s a)`, `Set s`, `Command (Cmd (Flow s a))`, `Await` (channel-keyed subscription continuation), `Batch` - form a composable algebra over Elm's runtime effects. The `Msg`/`update` dispatch layer is eliminated; an interpreter takes its place.
+**Experts:** `Flow s` is a **free monad over state, Elm commands, subscription continuations, concurrent fan-out, and join points**. Its constructors - `Pure`, `Get (s -> Flow s a)`, `Set s`, `Command (Cmd (Flow s a))`, `Await` (channel-keyed subscription continuation), `Batch`, `Gather` (join point collecting branch results) - form a composable algebra over Elm's runtime effects. The `Msg`/`update` dispatch layer is eliminated; an interpreter takes its place.
 
 What makes `Flow s` a monad? The fact that:
 
@@ -152,6 +152,34 @@ runJob id =
             )
 ```
 
+### Joining concurrent branches
+
+`batch` forks a Flow into branches; `gather` joins them back into one, continuing
+once every branch has finished with all results in branch order. Results are held
+by the runtime as JSON while other branches are still running, so `gather` takes a
+`Codec` (an encoder and a decoder):
+
+```elm
+loadUsers : List String -> Flow Model ()
+loadUsers userIds =
+    Flow.batch userIds
+        |> Flow.andThen fetchUser
+        |> Flow.gather (Flow.Codec encodeUser userDecoder)
+        |> Flow.andThen (\users -> Flow.modify (\m -> { m | users = users }))
+```
+
+When only completion matters, `gather_` waits for every branch and continues once
+with `()`, no `Codec` needed:
+
+```elm
+saveAll : List Draft -> Flow Model ()
+saveAll drafts =
+    Flow.batch drafts
+        |> Flow.andThen saveDraft
+        |> Flow.gather_
+        |> Flow.seq (Flow.modify (\m -> { m | status = AllSaved }))
+```
+
 
 ## Optics helpers
 
@@ -210,6 +238,7 @@ handleActivePage =
 - [`get`](./Flow#get) / [`set`](./Flow#set) / [`modify`](./Flow#modify) (read and write the model),
 - [`andThen`](./Flow#andThen) / [`map`](./Flow#map) / [`seq`](./Flow#seq) (sequence and transform),
 - [`batch`](./Flow#batch) / [`batchM`](./Flow#batchM) (run multiple branches),
+- [`gather`](./Flow#gather) / [`gather_`](./Flow#gather_) (wait for all branches, collecting or discarding their results),
 - [`none`](./Flow#none) (terminate the current branch).
 
 **Async**

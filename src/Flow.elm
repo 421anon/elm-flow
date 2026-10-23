@@ -9,12 +9,12 @@ module Flow exposing
     , replace
     , none
     , yield, forceRendering
-    , batch, batchM
+    , batch, batchM, gather, gather_, Codec
     , assertJust, assertOk, assertCondition, fromMaybe
     , performTask, attemptTask, attemptTaskWith
     , try, forAll, getAll, over, setAll, viaLens, viaPrism
     , ifHas, whenHas, unlessHas
-    , when, unless, if_, return, async, bracket_, setting, locking
+    , if_, when, unless, return, async, bracket_, setting, locking
     )
 
 {-| Write effectful Elm logic as composable steps - no `Msg` type, no `update` function.
@@ -75,7 +75,7 @@ Event handlers and subscriptions produce `Flow` values directly:
 
 # Batching
 
-@docs batch, batchM
+@docs batch, batchM, gather, gather_, Codec
 
 
 # Assertions and guards
@@ -383,6 +383,80 @@ batchM l =
     join (batch l)
 
 
+{-| Join the branches of a batched Flow: wait until every branch has finished,
+then continue once with all of their results.
+
+Results come in branch order (the order of the `batch` / `batchM` lists),
+not in completion order. Branches that terminate with `none` contribute
+nothing.
+
+Results are stored outside the Flow while the other branches are still
+running, so they travel as JSON: provide a [`Codec`](#Codec) for the result
+type. If its decoder rejects an encoded result, the joined Flow terminates.
+
+**WARNING:** the join waits for every branch forked inside it, including
+background branches started with [`async`](#async) or [`subscribe`](#subscribe).
+A branch that never finishes keeps the join waiting forever.
+
+    -- fetch all users concurrently, then store them in input order
+    Flow.batch userIds
+        |> Flow.andThen fetchUser
+        |> Flow.gather (Flow.Codec encodeUser userDecoder)
+        |> Flow.andThen (\users -> Flow.modify (\m -> { m | users = users }))
+
+-}
+gather : Codec a -> Flow s a -> Flow s (List a)
+gather codec flow =
+    Gather
+        (\values ->
+            case Json.Decode.decodeValue (Json.Decode.list codec.decoder) (Json.Encode.list identity values) of
+                Ok results ->
+                    Pure results
+
+                Err _ ->
+                    none
+        )
+        (andThen (codec.encoder >> Deliver) flow)
+
+
+{-| Like [`gather`](#gather), but discards the results: wait until every
+branch has finished, then continue once with `()`. Needs no `Codec`.
+
+**WARNING:** like `gather`, it waits for every branch forked inside it,
+including background branches.
+
+    -- save every draft concurrently, then report once
+    Flow.batch drafts
+        |> Flow.andThen saveDraft
+        |> Flow.gather_
+        |> Flow.seq (Flow.modify (\m -> { m | status = AllSaved }))
+
+-}
+gather_ : Flow s a -> Flow s ()
+gather_ flow =
+    Gather (\_ -> Pure ()) (andThen (\_ -> none) flow)
+
+
+{-| How to turn a value into JSON and back. The decoder must accept whatever
+the encoder produces.
+
+Build one with the record syntax or the `Codec` constructor:
+
+    userCodec : Flow.Codec User
+    userCodec =
+        { encoder = encodeUser, decoder = userDecoder }
+
+    intCodec : Flow.Codec Int
+    intCodec =
+        Flow.Codec Json.Encode.int Json.Decode.int
+
+-}
+type alias Codec a =
+    { encoder : a -> Json.Encode.Value
+    , decoder : Json.Decode.Decoder a
+    }
+
+
 {-| Lift a classic TEA `update`-style function into Flow. Reads the current
 model, applies the function, writes the new model, and emits any commands.
 
@@ -432,6 +506,12 @@ replace rget rset =
 
                 Await req sub ->
                     Await req (\key -> Sub.map (Maybe.map aux) (sub key))
+
+                Gather continue branches ->
+                    Gather (continue >> aux) (aux branches)
+
+                Deliver value ->
+                    Deliver value
     in
     aux
 
@@ -862,6 +942,12 @@ viaPrism optic innerFlow =
 
                 Await req sub ->
                     Await req (\key -> Sub.map (Maybe.map resume) (sub key))
+
+                Gather continue branches ->
+                    Gather (continue >> resume) (andThen (\_ -> none) (step branches))
+
+                Deliver value ->
+                    Deliver value
     in
     resume innerFlow
 
