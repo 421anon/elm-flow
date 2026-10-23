@@ -50,7 +50,7 @@ view model =
 
 ## Channels
 
-Channels connect subscriptions to a `Flow` pipeline. Use `Flow.Channel.connect` to build a channel from an Elm subscription port and an optional command port, then pass it to `Flow.await` (receive one value) or `Flow.subscribe` (handle values indefinitely).
+Channels connect subscriptions to a `Flow` pipeline. Use `Flow.connect` to build a channel from an Elm subscription port and a command port (or `Flow.listen` when a subscription port alone is enough), then pass it to `Flow.await` (receive one value) or `Flow.subscribe` (handle values indefinitely).
 
 ```elm
 -- In Ports.elm
@@ -66,9 +66,9 @@ type ServerMessage
 --   events    : List String   -- lens `events`
 --   listening : Bool          -- lens `listening`
 
-roomChannel : String -> ChannelSpec Model ServerMessage
+roomChannel : String -> Flow.ChannelSpec ServerMessage
 roomChannel roomId =
-    Flow.Channel.connect
+    Flow.connect
         Ports.wsMessages
         (\_ -> Ports.wsConnect roomId)
 
@@ -240,6 +240,11 @@ handleActivePage =
 - [`batch`](./Flow#batch) / [`batchM`](./Flow#batchM) (run multiple branches),
 - [`gather`](./Flow#gather) / [`gather_`](./Flow#gather_) (wait for all branches, collecting or discarding their results),
 - [`none`](./Flow#none) (terminate the current branch).
+
+**Channels**
+- [`connect`](./Flow#connect) / [`listen`](./Flow#listen) (describe a channel from ports, with or without a startup command),
+- [`filterChannel`](./Flow#filterChannel) (drop unwanted channel values),
+- [`openChannel`](./Flow#openChannel) / [`nextOnChannel`](./Flow#nextOnChannel) (low-level primitives behind `await` and `subscribe`).
 
 **Async**
 - [`await`](./Flow#await) (suspend until a Channel delivers one value),

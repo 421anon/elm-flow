@@ -1,20 +1,20 @@
 module Flow exposing
     ( Flow
-    , Program, element, document, application
-    , await, subscribe, subscribeWhile
-    , ffi
-    , pure, lift, liftUpdate
+    , pure, map, andThen, join, ap, flap, compose, seq, return, traverse, mapM
+    , if_, when, unless, bracket_
+    , none, assertJust, assertOk, assertCondition, fromMaybe
     , get, set, modify
-    , map, andThen, join, ap, flap, compose, seq, traverse, mapM
-    , replace
-    , none
+    , try, forAll, getAll, over, setAll, ifHas, whenHas, unlessHas, setting, locking
+    , viaLens, viaPrism, replace
+    , lift, liftUpdate, performTask, attemptTask, attemptTaskWith
+    , batch, batchM, async, gather, gather_, Codec(..)
     , yield, forceRendering
-    , batch, batchM, gather, gather_, Codec
-    , assertJust, assertOk, assertCondition, fromMaybe
-    , performTask, attemptTask, attemptTaskWith
-    , try, forAll, getAll, over, setAll, viaLens, viaPrism
-    , ifHas, whenHas, unlessHas
-    , if_, when, unless, return, async, bracket_, setting, locking
+    , ChannelSpec, Channel, ChannelKey
+    , connect, listen, filterChannel
+    , await, subscribe, subscribeWhile
+    , openChannel, nextOnChannel
+    , ffi
+    , Program, element, document, application
     )
 
 {-| Write effectful Elm logic as composable steps - no `Msg` type, no `update` function.
@@ -32,20 +32,19 @@ Event handlers and subscriptions produce `Flow` values directly:
 @docs Flow
 
 
-# Running a web application
+# Composing flows
 
-@docs Program, element, document, application
-
-
-# Subscriptions and channels
-
-@docs await, subscribe, subscribeWhile
-@docs ffi
+@docs pure, map, andThen, join, ap, flap, compose, seq, return, traverse, mapM
 
 
-# Lifting values and commands into Flow
+# Control flow
 
-@docs pure, lift, liftUpdate
+@docs if_, when, unless, bracket_
+
+
+# Terminating a fiber
+
+@docs none, assertJust, assertOk, assertCondition, fromMaybe
 
 
 # Reading and writing the model
@@ -53,56 +52,55 @@ Event handlers and subscriptions produce `Flow` values directly:
 @docs get, set, modify
 
 
-# Monadic operations
+# Optics
 
-@docs map, andThen, join, ap, flap, compose, seq, traverse, mapM
-
-
-# Zooming into sub-models via optics
-
-@docs replace
+@docs try, forAll, getAll, over, setAll, ifHas, whenHas, unlessHas, setting, locking
 
 
-# Terminating a computation
+# Zooming into sub-models
 
-@docs none
+@docs viaLens, viaPrism, replace
 
 
-# Forcing Elm to re-render
+# Commands and tasks
+
+@docs lift, liftUpdate, performTask, attemptTask, attemptTaskWith
+
+
+# Concurrency
+
+@docs batch, batchM, async, gather, gather_, Codec
+
+
+# Rendering
 
 @docs yield, forceRendering
 
 
-# Batching
+# Channels
 
-@docs batch, batchM, gather, gather_, Codec
+Describe an event source with a `ChannelSpec`: use `connect` when you have both
+a subscription source and a command to kick it off, or `listen` when
+subscriptions alone are enough. Then consume events with `await`, `subscribe`,
+or `subscribeWhile`, each of which opens a live `Channel` from the spec.
 
-
-# Assertions and guards
-
-@docs assertJust, assertOk, assertCondition, fromMaybe
-
-
-# Task helpers
-
-@docs performTask, attemptTask, attemptTaskWith
-
-@docs try, forAll, getAll, over, setAll, viaLens, viaPrism
-@docs ifHas, whenHas, unlessHas
+@docs ChannelSpec, Channel, ChannelKey
+@docs connect, listen, filterChannel
+@docs await, subscribe, subscribeWhile
+@docs openChannel, nextOnChannel
+@docs ffi
 
 
-# Control flow
+# Running a program
 
-@docs if_, when, unless, return, async, bracket_, setting, locking
+@docs Program, element, document, application
 
 -}
 
 import Accessors exposing (A_Lens, A_Prism, An_Optic)
 import Browser exposing (Document, UrlRequest)
 import Browser.Navigation exposing (Key)
-import Flow.Channel exposing (ChannelSpec)
-import Flow.Internal exposing (..)
-import Flow.Program
+import Dict exposing (Dict)
 import Html exposing (Html)
 import Json.Decode
 import Json.Encode
@@ -114,8 +112,121 @@ import Url exposing (Url)
 {-| A description of a computation that can read and write state `s` and
 eventually produces a value of type `a`.
 -}
-type alias Flow s a =
-    Flow.Internal.Flow s a
+type Flow s a
+    = Pure a
+    | Get (s -> Flow s a)
+    | Set s (Flow s a)
+    | Batch (List (Flow s a))
+    | Command (Cmd (Flow s a))
+    | Await ChannelRequest (ChannelKey -> Sub (Maybe (Flow s a)))
+    | Gather (List Json.Encode.Value -> Flow s a) (Flow s a)
+    | Deliver Json.Encode.Value
+
+
+type ChannelRequest
+    = Open (ChannelKey -> Cmd Never)
+    | Resume ChannelKey
+
+
+{-| A description of how to connect an external event source to a `Flow`
+pipeline. A spec does nothing by itself and can be opened any number of times,
+including concurrently; each opening is a separate `Channel`.
+-}
+type ChannelSpec a
+    = ChannelSpec
+        { open : ChannelKey -> Cmd Never
+        , values : ChannelKey -> Sub (Maybe a)
+        }
+
+
+{-| One live opening of a `ChannelSpec`. Receive further values from it with
+`nextOnChannel`.
+-}
+type Channel a
+    = Channel ChannelKey (ChannelSpec a)
+
+
+{-| Key identifying a `Channel`.
+
+Opening a spec creates a fresh key and passes it to the spec's command. The
+channel keeps that key for its whole lifetime, so the external source can tag
+its values with it and `filterChannel` can match them.
+
+-}
+type alias ChannelKey =
+    String
+
+
+{-| Build a spec from a subscription port and a command that opens or
+attaches it. The command fires each time the spec is opened, receiving the key
+of the new channel; `nextOnChannel` does not fire it again.
+
+    -- Port declarations:
+    --   port onMessage : (String -> msg) -> Sub msg
+    --   port subscribe : String -> Cmd msg
+    myChannel : ChannelSpec String
+    myChannel =
+        Flow.connect Ports.onMessage (\_ -> Ports.subscribe "myTopic")
+
+To drop or transform values before they reach the channel, wrap the port:
+
+    -- port onJson : (Json.Decode.Value -> msg) -> Sub msg
+    userChannel : ChannelSpec User
+    userChannel =
+        Flow.listen
+            (\toMsg -> Ports.onJson (Json.Decode.decodeValue userDecoder >> Result.toMaybe >> Maybe.andThen toMsg))
+
+-}
+connect : ((a -> Maybe a) -> Sub (Maybe a)) -> (ChannelKey -> Cmd Never) -> ChannelSpec a
+connect subPort cmdPort =
+    ChannelSpec
+        { open = cmdPort
+        , values = \_ -> subPort Just
+        }
+
+
+{-| Build a spec from a subscription port when no startup command is needed.
+
+    -- Port declaration:
+    --   port onKeyDown : (String -> msg) -> Sub msg
+    keyChannel : ChannelSpec String
+    keyChannel =
+        Flow.listen Ports.onKeyDown
+
+-}
+listen : ((a -> Maybe a) -> Sub (Maybe a)) -> ChannelSpec a
+listen subPort =
+    connect subPort (\_ -> Cmd.none)
+
+
+{-| Filter events for a spec. Only events for which the predicate returns
+`True` are forwarded; others are silently dropped.
+
+The predicate receives the `ChannelKey` of the channel and the event payload.
+Match on the key when the source tags values with it; otherwise you only need
+the payload:
+
+    Flow.filterChannel (\_ msg -> msg /= "") myChannel
+
+-}
+filterChannel : (ChannelKey -> a -> Bool) -> ChannelSpec a -> ChannelSpec a
+filterChannel predicate (ChannelSpec spec) =
+    ChannelSpec
+        { spec
+            | values =
+                \key ->
+                    Sub.map
+                        (Maybe.andThen
+                            (\a ->
+                                if predicate key a then
+                                    Just a
+
+                                else
+                                    Nothing
+                            )
+                        )
+                        (spec.values key)
+        }
 
 
 {-| Suspend this Flow pipeline, open a channel from the spec, and resume when a value arrives.
@@ -129,9 +240,9 @@ type alias Flow s a =
             |> Flow.andThen (\msg -> Flow.modify (\m -> { m | latestMessage = msg }))
 
 -}
-await : ChannelSpec s a -> Flow s a
+await : ChannelSpec a -> Flow s a
 await ch =
-    Flow.Channel.open ch (\_ -> Just << Pure)
+    openChannel ch (\_ -> Just << Pure)
 
 
 {-| Open a channel and run the given handler for every value it produces,
@@ -144,13 +255,13 @@ indefinitely.
             myChannel
 
 -}
-subscribe : (a -> Flow s ()) -> ChannelSpec s a -> Flow s a
+subscribe : (a -> Flow s ()) -> ChannelSpec a -> Flow s a
 subscribe handler ch =
     let
         continuation channel a =
-            Just (andThen (\() -> Flow.Channel.next channel (continuation channel)) (async (handler a)))
+            Just (andThen (\() -> nextOnChannel channel (continuation channel)) (async (handler a)))
     in
-    Flow.Channel.open ch continuation
+    openChannel ch continuation
 
 
 {-| Like `subscribe`, but stops when the predicate returns `False`.
@@ -166,7 +277,7 @@ immediately when the model changes.
     Flow.subscribeWhile (\_ msg -> msg /= "disconnect") handleMessage myChannel
 
 -}
-subscribeWhile : (s -> a -> Bool) -> (a -> Flow s ()) -> ChannelSpec s a -> Flow s a
+subscribeWhile : (s -> a -> Bool) -> (a -> Flow s ()) -> ChannelSpec a -> Flow s a
 subscribeWhile isActive handler ch =
     let
         continuation channel a =
@@ -174,14 +285,39 @@ subscribeWhile isActive handler ch =
                 (Get
                     (\model ->
                         if isActive model a then
-                            andThen (\() -> Flow.Channel.next channel (continuation channel)) (async (handler a))
+                            andThen (\() -> nextOnChannel channel (continuation channel)) (async (handler a))
 
                         else
                             none
                     )
                 )
     in
-    Flow.Channel.open ch continuation
+    openChannel ch continuation
+
+
+{-| Open a channel from a spec, firing the spec's command, and suspend until the
+first value arrives. The callback receives the opened `Channel` and each value:
+`Just flow` resumes with `flow`, `Nothing` ignores the value and keeps waiting.
+
+This is the low-level primitive that `await` and `subscribe` are built on.
+Prefer those unless you need custom continuation logic.
+
+-}
+openChannel : ChannelSpec a -> (Channel a -> a -> Maybe (Flow s b)) -> Flow s b
+openChannel ((ChannelSpec spec) as channelSpec) callback =
+    Await
+        (Open spec.open)
+        (\key -> Sub.map (Maybe.andThen (callback (Channel key channelSpec))) (spec.values key))
+
+
+{-| Wait for the next value on an already opened channel, without firing the
+spec's command again.
+-}
+nextOnChannel : Channel a -> (a -> Maybe (Flow s b)) -> Flow s b
+nextOnChannel (Channel key (ChannelSpec spec)) callback =
+    Await
+        (Resume key)
+        (\resumed -> Sub.map (Maybe.andThen callback) (spec.values resumed))
 
 
 {-| Lift a plain value into Flow without performing any effects.
@@ -273,8 +409,31 @@ first.
 
 -}
 andThen : (a -> Flow s b) -> Flow s a -> Flow s b
-andThen =
-    Flow.Internal.andThen
+andThen f flow =
+    case flow of
+        Pure a ->
+            f a
+
+        Get k ->
+            Get (\s -> andThen f (k s))
+
+        Set s next ->
+            Set s (andThen f next)
+
+        Batch l ->
+            Batch (List.map (andThen f) l)
+
+        Command cmd ->
+            Command (Cmd.map (andThen f) cmd)
+
+        Await req sub ->
+            Await req (\key -> Sub.map (Maybe.map (andThen f)) (sub key))
+
+        Gather continue branches ->
+            Gather (continue >> andThen f) (andThen f branches)
+
+        Deliver value ->
+            Deliver value
 
 
 {-| Flatten a nested `Flow s (Flow s a)` into `Flow s a`.
@@ -341,9 +500,9 @@ seq second first =
 {-| The empty computation. Terminates the current branch without producing a
 value or changing state.
 
-**WARNING:** `none` is a 0-threaded program - it has no active thread to carry
+**WARNING:** `none` is a 0-fiber program - it has no active fiber to carry
 a continuation forward. Chaining it with `andThen`, `seq`, etc. produces
-another 0-threaded program, so those continuations will never run.
+another 0-fiber program, so those continuations will never run.
 
     Flow.get
         |> Flow.andThen
@@ -358,15 +517,15 @@ another 0-threaded program, so those continuations will never run.
 -}
 none : Flow s a
 none =
-    Flow.Internal.none
+    Batch []
 
 
 {-| Run a list of Flow computations as concurrent branches. Each branch runs
 independently; the continuation (via `andThen`) is invoked once per branch
 with that branch's individual result.
 
-**WARNING:** `batchM` multiplies the number of threads by the number of continuations.
-If you wish to extend a multi-threaded Flow on a single branch, consider [`async`](#async).
+**WARNING:** `batchM` multiplies the number of fibers by the number of continuations.
+If you wish to extend a multi-fiber Flow on a single branch, consider [`async`](#async).
 
 Use [`mapM`](#mapM) instead if you want the results collected into a `List`.
 
@@ -406,17 +565,17 @@ A branch that never finishes keeps the join waiting forever.
 
 -}
 gather : Codec a -> Flow s a -> Flow s (List a)
-gather codec flow =
+gather (Codec encoder decoder) flow =
     Gather
         (\values ->
-            case Json.Decode.decodeValue (Json.Decode.list codec.decoder) (Json.Encode.list identity values) of
+            case Json.Decode.decodeValue (Json.Decode.list decoder) (Json.Encode.list identity values) of
                 Ok results ->
                     Pure results
 
                 Err _ ->
                     none
         )
-        (andThen (codec.encoder >> Deliver) flow)
+        (andThen (encoder >> Deliver) flow)
 
 
 {-| Like [`gather`](#gather), but discards the results: wait until every
@@ -437,24 +596,16 @@ gather_ flow =
     Gather (\_ -> Pure ()) (andThen (\_ -> none) flow)
 
 
-{-| How to turn a value into JSON and back. The decoder must accept whatever
-the encoder produces.
-
-Build one with the record syntax or the `Codec` constructor:
+{-| How to turn a value into JSON and back: an encoder and a decoder that
+accepts whatever the encoder produces.
 
     userCodec : Flow.Codec User
     userCodec =
-        { encoder = encodeUser, decoder = userDecoder }
-
-    intCodec : Flow.Codec Int
-    intCodec =
-        Flow.Codec Json.Encode.int Json.Decode.int
+        Flow.Codec encodeUser userDecoder
 
 -}
-type alias Codec a =
-    { encoder : a -> Json.Encode.Value
-    , decoder : Json.Decode.Decoder a
-    }
+type Codec a
+    = Codec (a -> Json.Encode.Value) (Json.Decode.Decoder a)
 
 
 {-| Lift a classic TEA `update`-style function into Flow. Reads the current
@@ -584,7 +735,7 @@ forceRendering =
 `Flow.document`, and `Flow.application`.
 -}
 type alias Program flags s a =
-    Platform.Program flags ( s, Flow.Program.Model (Flow s a) ) (Flow.Program.RuntimeMsg (Flow s a))
+    Platform.Program flags ( s, Runtime s a ) (RuntimeMsg s a)
 
 
 {-| Build a standard `Browser.element` program whose messages are `Flow`
@@ -598,10 +749,10 @@ element :
     -> Program flags s a
 element args =
     Browser.element
-        { update = Flow.Program.runtimeUpdate
-        , init = args.init >> Flow.Program.runtimeInit
-        , view = \( model, _ ) -> Html.map Flow.Program.UserFlow (args.view model)
-        , subscriptions = Flow.Program.subscriptions args.subscriptions
+        { update = runtimeUpdate
+        , init = args.init >> runtimeInit
+        , view = \( model, _ ) -> Html.map UserFlow (args.view model)
+        , subscriptions = runtimeSubscriptions args.subscriptions
         }
 
 
@@ -624,16 +775,16 @@ document :
     -> Program flags s a
 document args =
     Browser.document
-        { update = Flow.Program.runtimeUpdate
-        , init = args.init >> Flow.Program.runtimeInit
+        { update = runtimeUpdate
+        , init = args.init >> runtimeInit
         , view =
             \( model, _ ) ->
                 let
                     doc =
                         args.view model
                 in
-                { title = doc.title, body = List.map (Html.map Flow.Program.UserFlow) doc.body }
-        , subscriptions = Flow.Program.subscriptions args.subscriptions
+                { title = doc.title, body = List.map (Html.map UserFlow) doc.body }
+        , subscriptions = runtimeSubscriptions args.subscriptions
         }
 
 
@@ -659,19 +810,219 @@ application :
     -> Program flags s a
 application args =
     Browser.application
-        { update = Flow.Program.runtimeUpdate
-        , init = \f u k -> Flow.Program.runtimeInit (args.init f u k)
+        { update = runtimeUpdate
+        , init = \f u k -> runtimeInit (args.init f u k)
         , view =
             \( model, _ ) ->
                 let
                     doc =
                         args.view model
                 in
-                { title = doc.title, body = List.map (Html.map Flow.Program.UserFlow) doc.body }
-        , subscriptions = Flow.Program.subscriptions args.subscriptions
-        , onUrlRequest = \req -> Flow.Program.UserFlow (args.onUrlRequest req)
-        , onUrlChange = \url -> Flow.Program.UserFlow (args.onUrlChange url)
+                { title = doc.title, body = List.map (Html.map UserFlow) doc.body }
+        , subscriptions = runtimeSubscriptions args.subscriptions
+        , onUrlRequest = \req -> UserFlow (args.onUrlRequest req)
+        , onUrlChange = \url -> UserFlow (args.onUrlChange url)
         }
+
+
+type alias Runtime s a =
+    { nextId : Int
+    , channels : Dict Int (Sub (RuntimeMsg s a))
+    , joins : Dict Int (JoinPoint s a)
+    }
+
+
+type alias JoinPoint s a =
+    { pending : Int
+    , results : List ( List Int, Json.Encode.Value )
+    , continue : List Json.Encode.Value -> Flow s a
+    , parent : Fiber
+    }
+
+
+type Fiber
+    = Root
+    | Branch Int (List Int)
+
+
+type RuntimeMsg s a
+    = UserFlow (Flow s a)
+    | Continue Fiber (Flow s a)
+    | Unsubscribe Int Fiber (Flow s a)
+
+
+type alias RuntimeStep s a =
+    ( s, Runtime s a, Cmd (RuntimeMsg s a) )
+
+
+runtimeInit : ( s, Flow s a ) -> ( ( s, Runtime s a ), Cmd (RuntimeMsg s a) )
+runtimeInit ( model, flow ) =
+    runtimeUpdate (UserFlow flow) ( model, { nextId = 0, channels = Dict.empty, joins = Dict.empty } )
+
+
+runtimeUpdate : RuntimeMsg s a -> ( s, Runtime s a ) -> ( ( s, Runtime s a ), Cmd (RuntimeMsg s a) )
+runtimeUpdate msg ( model, runtime ) =
+    case msg of
+        UserFlow flow ->
+            commit (run Root flow model runtime)
+
+        Continue fiber flow ->
+            commit (run fiber flow model runtime)
+
+        Unsubscribe channelId fiber flow ->
+            if Dict.member channelId runtime.channels then
+                commit (run fiber flow model { runtime | channels = Dict.remove channelId runtime.channels })
+
+            else
+                ( ( model, runtime ), Cmd.none )
+
+
+commit : RuntimeStep s a -> ( ( s, Runtime s a ), Cmd (RuntimeMsg s a) )
+commit ( model, runtime, cmd ) =
+    ( ( model, runtime ), cmd )
+
+
+runtimeSubscriptions : (s -> Sub (Flow s a)) -> ( s, Runtime s a ) -> Sub (RuntimeMsg s a)
+runtimeSubscriptions userSubs ( model, runtime ) =
+    Sub.batch
+        [ Sub.map UserFlow (userSubs model)
+        , Sub.batch (Dict.values runtime.channels)
+        ]
+
+
+run : Fiber -> Flow s a -> s -> Runtime s a -> RuntimeStep s a
+run fiber flow model runtime =
+    case flow of
+        Pure _ ->
+            finishFiber fiber Nothing model runtime
+
+        Deliver value ->
+            finishFiber fiber (Just value) model runtime
+
+        Get k ->
+            run fiber (k model) model runtime
+
+        Set newModel next ->
+            run fiber next newModel runtime
+
+        Batch [] ->
+            finishFiber fiber Nothing model runtime
+
+        Batch branches ->
+            let
+                ( finalModel, finalRuntime, cmds ) =
+                    List.foldl
+                        (\( index, branch ) ( currentModel, currentRuntime, accCmds ) ->
+                            let
+                                ( nextModel, nextRuntime, cmd ) =
+                                    run (forkFiber index fiber) branch currentModel currentRuntime
+                            in
+                            ( nextModel, nextRuntime, cmd :: accCmds )
+                        )
+                        ( model, spawnFibers (List.length branches - 1) fiber runtime, [] )
+                        (List.indexedMap Tuple.pair branches)
+            in
+            ( finalModel, finalRuntime, Cmd.batch cmds )
+
+        Command cmd ->
+            ( model, runtime, Cmd.map (Continue fiber) cmd )
+
+        Await request sub ->
+            let
+                channelId =
+                    runtime.nextId
+
+                ( key, cmd ) =
+                    case request of
+                        Open open ->
+                            let
+                                fresh =
+                                    "Channel-" ++ String.fromInt channelId
+                            in
+                            ( fresh, open fresh )
+
+                        Resume existing ->
+                            ( existing, Cmd.none )
+
+                wrapMsg fired =
+                    case fired of
+                        Nothing ->
+                            UserFlow none
+
+                        Just next ->
+                            Unsubscribe channelId fiber next
+            in
+            ( model
+            , { runtime
+                | nextId = runtime.nextId + 1
+                , channels = Dict.insert channelId (Sub.map wrapMsg (sub key)) runtime.channels
+              }
+            , Cmd.map never cmd
+            )
+
+        Gather continue branches ->
+            let
+                joinId =
+                    runtime.nextId
+            in
+            run (Branch joinId [])
+                branches
+                model
+                { runtime
+                    | nextId = runtime.nextId + 1
+                    , joins = Dict.insert joinId { pending = 1, results = [], continue = continue, parent = fiber } runtime.joins
+                }
+
+
+finishFiber : Fiber -> Maybe Json.Encode.Value -> s -> Runtime s a -> RuntimeStep s a
+finishFiber fiber delivered model runtime =
+    case fiber of
+        Root ->
+            ( model, runtime, Cmd.none )
+
+        Branch joinId path ->
+            case Dict.get joinId runtime.joins of
+                Nothing ->
+                    ( model, runtime, Cmd.none )
+
+                Just joinPoint ->
+                    let
+                        results =
+                            delivered
+                                |> Maybe.map (\value -> ( path, value ) :: joinPoint.results)
+                                |> Maybe.withDefault joinPoint.results
+                    in
+                    if joinPoint.pending == 1 then
+                        run joinPoint.parent
+                            (joinPoint.continue (List.map Tuple.second (List.sortBy Tuple.first results)))
+                            model
+                            { runtime | joins = Dict.remove joinId runtime.joins }
+
+                    else
+                        ( model
+                        , { runtime | joins = Dict.insert joinId { joinPoint | pending = joinPoint.pending - 1, results = results } runtime.joins }
+                        , Cmd.none
+                        )
+
+
+spawnFibers : Int -> Fiber -> Runtime s a -> Runtime s a
+spawnFibers count fiber runtime =
+    case fiber of
+        Root ->
+            runtime
+
+        Branch joinId _ ->
+            { runtime | joins = Dict.update joinId (Maybe.map (\joinPoint -> { joinPoint | pending = joinPoint.pending + count })) runtime.joins }
+
+
+forkFiber : Int -> Fiber -> Fiber
+forkFiber index fiber =
+    case fiber of
+        Root ->
+            Root
+
+        Branch joinId path ->
+            Branch joinId (path ++ [ index ])
 
 
 {-| Continue only if the value is `Just`, terminate with `none` otherwise.
@@ -807,7 +1158,7 @@ try optic f =
     get |> map (Accessors.try optic) |> andThen f
 
 
-{-| Fork into n concurrent threads for each matching value through an optic.
+{-| Fork into n concurrent fibers for each matching value through an optic.
 
     -- Only runs if a user is logged in
     Flow.forAll MyLenses.currentUser
@@ -1060,15 +1411,15 @@ with the rest of the batch.
 
 -}
 async : Flow s a -> Flow s ()
-async =
-    Flow.Internal.async
+async io =
+    Batch [ andThen (\_ -> none) io, Pure () ]
 
 
 {-| Acquire a resource, run a computation, then release the resource.
 
-**WARNING:** If the computation forks into multiple threads, the
-release step will run once per thread. This also means that if the
-computation is terminating (which is equivalent to forking into 0 threads),
+**WARNING:** If the computation forks into multiple fibers, the
+release step will run once per fiber. This also means that if the
+computation is terminating (which is equivalent to forking into 0 fibers),
 then the release step will NOT run.
 
     Flow.bracket_
@@ -1142,28 +1493,28 @@ match JavaScript responses back to the correct `Flow` request.
 -}
 ffi :
     ({ key : String, fn : String, value : Json.Encode.Value } -> Cmd Never)
-    -> (({ key : String, value : Json.Decode.Value } -> Maybe (Flow s { key : String, payload : b })) -> Sub (Maybe (Flow s { key : String, payload : b })))
+    -> (({ key : String, value : Json.Decode.Value } -> Maybe { key : String, value : Json.Decode.Value }) -> Sub (Maybe { key : String, value : Json.Decode.Value }))
     -> String
     -> (a -> Json.Encode.Value)
     -> Json.Decode.Decoder b
     -> a
     -> Flow s b
-ffi outPort inPort fnName encode decode payload =
-    let
-        channel =
-            Flow.Channel.connect
-                (\callback ->
-                    inPort
-                        (\msg ->
-                            case Json.Decode.decodeValue decode msg.value of
-                                Ok result ->
-                                    callback { key = msg.key, payload = result }
+ffi outPort inPort fnName encode decoder payload =
+    await
+        (ChannelSpec
+            { open = \key -> outPort { key = key, fn = fnName, value = encode payload }
+            , values =
+                \key ->
+                    Sub.map
+                        (Maybe.andThen
+                            (\msg ->
+                                if msg.key == key then
+                                    Result.toMaybe (Json.Decode.decodeValue decoder msg.value)
 
-                                Err _ ->
+                                else
                                     Nothing
+                            )
                         )
-                )
-                (\key -> Cmd.map never (outPort { key = key, fn = fnName, value = encode payload }))
-    in
-    await (Flow.Channel.filter (\key msg -> msg.key == key) channel)
-        |> andThen (\msg -> pure msg.payload)
+                        (inPort Just)
+            }
+        )
