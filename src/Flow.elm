@@ -12,7 +12,7 @@ module Flow exposing
     , batch, batchM
     , assertJust, assertOk, assertCondition, fromMaybe
     , performTask, attemptTask, attemptTaskWith
-    , try, forAll, getAll, over, setAll, via
+    , try, forAll, getAll, over, setAll, viaLens, viaPrism
     , ifHas, whenHas, unlessHas
     , when, unless, if_, return, async, bracket_, setting, locking
     )
@@ -87,7 +87,7 @@ Event handlers and subscriptions produce `Flow` values directly:
 
 @docs performTask, attemptTask, attemptTaskWith
 
-@docs try, forAll, getAll, over, setAll, via
+@docs try, forAll, getAll, over, setAll, viaLens, viaPrism
 @docs ifHas, whenHas, unlessHas
 
 
@@ -97,7 +97,7 @@ Event handlers and subscriptions produce `Flow` values directly:
 
 -}
 
-import Accessors exposing (A_Lens, An_Optic)
+import Accessors exposing (A_Lens, A_Prism, An_Optic)
 import Browser exposing (Document, UrlRequest)
 import Browser.Navigation exposing (Key)
 import Flow.Channel exposing (Channel)
@@ -404,9 +404,9 @@ liftUpdate f =
 {-| Re-interpret a `Flow a x` inside a larger context `Flow b x` by providing
 a getter (`Flow b a`) and a setter (`a -> Flow b ()`).
 
-This is the primitive that `via` and the other optics helpers are built on.
-Use `via` in normal code; reach for `replace` only when you need a custom
-traversal that optics cannot express.
+This is the primitive that `viaLens` is built on. Use `viaLens` in normal code;
+reach for `replace` only when you need a custom traversal that optics cannot
+express.
 
 -}
 replace : Flow b a -> (a -> Flow b ()) -> Flow a x -> Flow b x
@@ -770,12 +770,12 @@ setAll =
     (>>) always << over
 
 
-{-| Embed a `Flow inner a` into a larger model `outer` through an optic. All state
-reads and writes inside the sub-flow are transparently routed through the optic.
+{-| Embed a `Flow inner a` into a larger model `outer` through a lens. All state
+reads and writes inside the sub-flow are transparently routed through the lens.
 
 This is the primary tool for reusable components: write a self-contained `Flow`
 against a sub-model type, then embed it anywhere that sub-model appears by
-passing in the appropriate optic.
+passing in the appropriate lens.
 
     -- SelectState is a reusable component with its own Flow logic
     handleArrowDown : Flow SelectState ()
@@ -785,14 +785,85 @@ passing in the appropriate optic.
             |> Flow.andThen (\i -> Flow.modify (set activeIndex (i + 1)))
 
     -- Embed it into the parent model through a lens
-    Flow.via MyLenses.selectState handleArrowDown
+    Flow.viaLens MyLenses.selectState handleArrowDown
 
 -}
-via : An_Optic pr ls outer inner -> Flow inner a -> Flow outer a
-via optic =
+viaLens : A_Lens pr outer inner -> Flow inner a -> Flow outer a
+viaLens optic =
     replace
-        (get |> andThen (batchM << List.map pure << Accessors.all optic))
-        (setAll optic)
+        (get |> map (Accessors.get optic))
+        (modify << Accessors.set optic)
+
+
+{-| Embed a `Flow inner a` into a larger model `outer` through a prism.
+
+When the prism matches, the sub-flow runs with its state routed through the
+prism and its result is returned as `Just`. When the prism does not match, the
+sub-flow is skipped and the result is `Nothing`. If the prism stops matching
+while the sub-flow is suspended (for example across `await`), the sub-flow
+stops there and produces `Nothing`.
+
+    -- Run a component only while the model holds its active variant
+    Flow.viaPrism MyLenses.activePage handlePageEvent
+
+-}
+viaPrism : A_Prism ls outer inner -> Flow inner a -> Flow outer (Maybe a)
+viaPrism optic innerFlow =
+    let
+        resume : Flow inner x -> Flow outer (Maybe x)
+        resume flow =
+            get
+                |> andThen
+                    (\outer ->
+                        case Accessors.try optic outer of
+                            Just _ ->
+                                step flow
+
+                            Nothing ->
+                                pure Nothing
+                    )
+
+        step : Flow inner x -> Flow outer (Maybe x)
+        step flow =
+            case flow of
+                Pure x ->
+                    pure (Just x)
+
+                Get k ->
+                    get
+                        |> andThen
+                            (\outer ->
+                                case Accessors.try optic outer of
+                                    Just inner ->
+                                        step (k inner)
+
+                                    Nothing ->
+                                        pure Nothing
+                            )
+
+                Set inner next ->
+                    get
+                        |> andThen
+                            (\outer ->
+                                case Accessors.try optic outer of
+                                    Just _ ->
+                                        set (Accessors.set optic inner outer)
+                                            |> andThen (\_ -> step next)
+
+                                    Nothing ->
+                                        pure Nothing
+                            )
+
+                Batch flows ->
+                    Batch (List.map step flows)
+
+                Command cmd ->
+                    Command (Cmd.map resume cmd)
+
+                Await req sub ->
+                    Await req (\key -> Sub.map (Maybe.map resume) (sub key))
+    in
+    resume innerFlow
 
 
 {-| Branch on whether an optic matches: run `onPresent` with the matched value

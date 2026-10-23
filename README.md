@@ -161,7 +161,7 @@ that reads like imperative mutation.
 
 We recommend watching the recording of a talk by Edward Kmett titled "Lenses: A Functional Imperative".
 
-The optics helpers (`try`, `forAll`, `over`, `setAll`, `via`) work with
+The optics helpers (`try`, `forAll`, `over`, `setAll`, `viaLens`, `viaPrism`) work with
 [`erlandsona/elm-accessors`](https://package.elm-lang.org/packages/erlandsona/elm-accessors/latest/)
 lenses to target sub-fields without manual getter/setter boilerplate.
 
@@ -179,8 +179,8 @@ recordLogin newName newEmail =
         |> Flow.seq (Flow.over (user << loginCount) ((+) 1))
 ```
 
-`via` zooms into a sub-model so you can write a self-contained `Flow` against it
-and reuse it anywhere that sub-model appears:
+`viaLens` zooms into a sub-model through a lens so you can write a self-contained
+`Flow` against it and reuse it anywhere that sub-model appears:
 
 ```elm
 -- operates only on User, with no knowledge of Model
@@ -190,7 +190,16 @@ normaliseUser =
         |> Flow.seq (Flow.over email String.toLower)
 
 -- embed into the full model through the `user` lens
-Flow.via user normaliseUser
+Flow.viaLens user normaliseUser
+```
+
+`viaPrism` does the same through a prism, running the sub-`Flow` only when the
+prism matches and returning `Just` of its result (or `Nothing` when it does not):
+
+```elm
+handleActivePage : Flow Model (Maybe ())
+handleActivePage =
+    Flow.viaPrism activePage handlePageEvent
 ```
 
 ## API quick reference
@@ -234,7 +243,8 @@ Flow.via user normaliseUser
 - [`getAll`](./Flow#getAll) (read all values targeted by a traversal),
 - [`over`](./Flow#over) (modify value(s) through an optic),
 - [`setAll`](./Flow#setAll) (set value(s) through an optic),
-- [`via`](./Flow#via) (zoom a sub-`Flow` into a larger model through an optic).
+- [`viaLens`](./Flow#viaLens) (zoom a sub-`Flow` into a larger model through a lens),
+- [`viaPrism`](./Flow#viaPrism) (zoom a sub-`Flow` into a larger model through a prism).
 
 **FFI**
 - [`ffi`](./Flow#ffi) (call a JavaScript function by name through a single port pair).
