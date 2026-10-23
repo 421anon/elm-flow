@@ -246,16 +246,18 @@ await ch =
 
 
 {-| Open a channel and run the given handler for every value it produces,
-indefinitely.
+indefinitely. It never produces a value of its own; use `Flow.map never` to
+fit it where another result type is expected.
 
     listenForever : Flow Model ()
     listenForever =
         Flow.subscribe
             (\msg -> Flow.modify (\m -> { m | latestMessage = msg }))
             myChannel
+            |> Flow.map never
 
 -}
-subscribe : (a -> Flow s ()) -> ChannelSpec a -> Flow s a
+subscribe : (a -> Flow s ()) -> ChannelSpec a -> Flow s Never
 subscribe handler ch =
     let
         continuation channel a =
@@ -277,7 +279,7 @@ immediately when the model changes.
     Flow.subscribeWhile (\_ msg -> msg /= "disconnect") handleMessage myChannel
 
 -}
-subscribeWhile : (s -> a -> Bool) -> (a -> Flow s ()) -> ChannelSpec a -> Flow s a
+subscribeWhile : (s -> a -> Bool) -> (a -> Flow s ()) -> ChannelSpec a -> Flow s Never
 subscribeWhile isActive handler ch =
     let
         continuation channel a =

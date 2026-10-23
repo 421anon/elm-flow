@@ -33,7 +33,7 @@ import Html.Events
 type alias Model =
     { count : Int }
 
-main : Flow.Program () Model Never
+main : Flow.Program () Model ()
 main =
     Flow.element
         { init = \_ -> ( { count = 0 }, Flow.none )
@@ -50,16 +50,23 @@ view model =
 
 ## Channels
 
-Channels connect subscriptions to a `Flow` pipeline. Use `Flow.connect` to build a channel from an Elm subscription port and a command port (or `Flow.listen` when a subscription port alone is enough), then pass it to `Flow.await` (receive one value) or `Flow.subscribe` (handle values indefinitely).
+Channels connect subscriptions to a `Flow` pipeline. Use `Flow.connect` to build a channel from an Elm subscription port and a command port (or `Flow.listen` when a subscription port alone is enough), then pass it to `Flow.await` (receive one value) or `Flow.subscribe` (handle values indefinitely). Pass a port directly, or wrap it to decode values; values that fail to decode are dropped.
 
 ```elm
 -- In Ports.elm
-port wsMessages : (ServerMessage -> msg) -> Sub msg
+port wsMessages : (Json.Decode.Value -> msg) -> Sub msg
 port wsConnect  : String -> Cmd msg
 
 type ServerMessage
     = ChatMessage String
     | RoomEvent String
+
+serverMessage : Json.Decode.Decoder ServerMessage
+serverMessage =
+    Json.Decode.oneOf
+        [ Json.Decode.map ChatMessage (Json.Decode.field "chat" Json.Decode.string)
+        , Json.Decode.map RoomEvent (Json.Decode.field "event" Json.Decode.string)
+        ]
 
 -- Assumes a Model with:
 --   messages  : List String   -- lens `messages`
@@ -69,7 +76,7 @@ type ServerMessage
 roomChannel : String -> Flow.ChannelSpec ServerMessage
 roomChannel roomId =
     Flow.connect
-        Ports.wsMessages
+        (\toMsg -> Ports.wsMessages (Json.Decode.decodeValue serverMessage >> Result.toMaybe >> Maybe.andThen toMsg))
         (\_ -> Ports.wsConnect roomId)
 
 handleMessage : ServerMessage -> Flow Model ()
@@ -83,6 +90,7 @@ handleMessage msg =
 listenRoom : String -> Flow Model ()
 listenRoom roomId =
     Flow.subscribeWhile (\model _ -> model.listening) handleMessage (roomChannel roomId)
+        |> Flow.map never
 
 leaveRoom : Flow Model ()
 leaveRoom =
@@ -232,56 +240,69 @@ handleActivePage =
 
 ## API quick reference
 
-**Core**
+**Composing flows**
 - [`pure`](./Flow#pure) (lift a value),
-- [`lift`](./Flow#lift) (lift a `Cmd`),
-- [`get`](./Flow#get) / [`set`](./Flow#set) / [`modify`](./Flow#modify) (read and write the model),
-- [`andThen`](./Flow#andThen) / [`map`](./Flow#map) / [`seq`](./Flow#seq) (sequence and transform),
-- [`batch`](./Flow#batch) / [`batchM`](./Flow#batchM) (run multiple branches),
-- [`gather`](./Flow#gather) / [`gather_`](./Flow#gather_) (wait for all branches, collecting or discarding their results),
-- [`none`](./Flow#none) (terminate the current branch).
-
-**Channels**
-- [`connect`](./Flow#connect) / [`listen`](./Flow#listen) (describe a channel from ports, with or without a startup command),
-- [`filterChannel`](./Flow#filterChannel) (drop unwanted channel values),
-- [`openChannel`](./Flow#openChannel) / [`nextOnChannel`](./Flow#nextOnChannel) (low-level primitives behind `await` and `subscribe`).
-
-**Async**
-- [`await`](./Flow#await) (suspend until a Channel delivers one value),
-- [`subscribe`](./Flow#subscribe) (handle every value indefinitely),
-- [`subscribeWhile`](./Flow#subscribeWhile) (handle values while a predicate holds),
-- [`yield`](./Flow#yield) (force a render cycle before continuing),
-- [`async`](./Flow#async) (fire-and-forget a sub-computation).
+- [`andThen`](./Flow#andThen) / [`map`](./Flow#map) / [`seq`](./Flow#seq) / [`return`](./Flow#return) (sequence and transform),
+- [`join`](./Flow#join) / [`ap`](./Flow#ap) / [`flap`](./Flow#flap) / [`compose`](./Flow#compose) (monadic plumbing),
+- [`traverse`](./Flow#traverse) / [`mapM`](./Flow#mapM) (run a list of flows in sequence, collecting results).
 
 **Control flow**
-- [`when`](./Flow#when) (conditional execution),
-- [`return`](./Flow#return) (run a Flow for its effects, then produce a fixed value),
-- [`bracket_`](./Flow#bracket_) (acquire/release resources),
-- [`setting`](./Flow#setting) (hold a `Bool` lens `True` for a computation),
-- [`locking`](./Flow#locking) (skip if a `Bool` lens is already `True`).
+- [`if_`](./Flow#if_) / [`when`](./Flow#when) / [`unless`](./Flow#unless) (conditional execution),
+- [`bracket_`](./Flow#bracket_) (acquire/release resources).
 
-**Assertions**
+**Terminating a fiber**
+- [`none`](./Flow#none) (terminate the current fiber),
 - [`assertJust`](./Flow#assertJust) (terminate if `Nothing`),
 - [`assertOk`](./Flow#assertOk) (terminate if `Err`),
 - [`assertCondition`](./Flow#assertCondition) (terminate if predicate fails),
 - [`fromMaybe`](./Flow#fromMaybe) (unwrap a `Maybe` or terminate).
 
-**Tasks**
+**Reading and writing the model**
+- [`get`](./Flow#get) / [`set`](./Flow#set) / [`modify`](./Flow#modify).
+
+**Optics**
+- [`try`](./Flow#try) (read through an optic, producing `Just` or `Nothing`),
+- [`forAll`](./Flow#forAll) (fork a fiber per value targeted by an optic),
+- [`getAll`](./Flow#getAll) (read all values targeted by a traversal),
+- [`over`](./Flow#over) / [`setAll`](./Flow#setAll) (modify or set value(s) through an optic),
+- [`ifHas`](./Flow#ifHas) / [`whenHas`](./Flow#whenHas) / [`unlessHas`](./Flow#unlessHas) (branch on whether an optic matches),
+- [`setting`](./Flow#setting) (hold a `Bool` lens `True` for a computation),
+- [`locking`](./Flow#locking) (skip if a `Bool` lens is already `True`).
+
+**Zooming into sub-models**
+- [`viaLens`](./Flow#viaLens) (zoom a sub-`Flow` into a larger model through a lens),
+- [`viaPrism`](./Flow#viaPrism) (zoom a sub-`Flow` into a larger model through a prism),
+- [`replace`](./Flow#replace) (zoom with a custom getter and setter).
+
+**Commands and tasks**
+- [`lift`](./Flow#lift) (lift a `Cmd`),
+- [`liftUpdate`](./Flow#liftUpdate) (lift a TEA-style `update` function),
 - [`performTask`](./Flow#performTask) (run an infallible `Task`),
 - [`attemptTask`](./Flow#attemptTask) (fire-and-forget a fallible `Task`),
 - [`attemptTaskWith`](./Flow#attemptTaskWith) (run a fallible `Task` and handle the `Result`).
 
-**Optics**
-- [`try`](./Flow#try) (read through an optic, producing `Just` or `Nothing`),
-- [`forAll`](./Flow#forAll) (read through an optic, terminating if it does not match),
-- [`getAll`](./Flow#getAll) (read all values targeted by a traversal),
-- [`over`](./Flow#over) (modify value(s) through an optic),
-- [`setAll`](./Flow#setAll) (set value(s) through an optic),
-- [`viaLens`](./Flow#viaLens) (zoom a sub-`Flow` into a larger model through a lens),
-- [`viaPrism`](./Flow#viaPrism) (zoom a sub-`Flow` into a larger model through a prism).
+**Concurrency**
+- [`batch`](./Flow#batch) / [`batchM`](./Flow#batchM) (fork into multiple fibers),
+- [`async`](./Flow#async) (fire-and-forget a sub-computation),
+- [`gather`](./Flow#gather) / [`gather_`](./Flow#gather_) (wait for all fibers, collecting or discarding their results),
+- [`Codec`](./Flow#Codec) (encoder and decoder for `gather`).
 
-**FFI**
+**Rendering**
+- [`yield`](./Flow#yield) (force a render cycle before continuing),
+- [`forceRendering`](./Flow#forceRendering) (render after every state write).
+
+**Channels**
+- [`ChannelSpec`](./Flow#ChannelSpec) / [`Channel`](./Flow#Channel) / [`ChannelKey`](./Flow#ChannelKey),
+- [`connect`](./Flow#connect) / [`listen`](./Flow#listen) (describe a channel from ports, with or without a startup command),
+- [`filterChannel`](./Flow#filterChannel) (drop unwanted channel values),
+- [`await`](./Flow#await) (suspend until a channel delivers one value),
+- [`subscribe`](./Flow#subscribe) (handle every value indefinitely),
+- [`subscribeWhile`](./Flow#subscribeWhile) (handle values while a predicate holds),
+- [`openChannel`](./Flow#openChannel) / [`nextOnChannel`](./Flow#nextOnChannel) (low-level primitives behind `await` and `subscribe`),
 - [`ffi`](./Flow#ffi) (call a JavaScript function by name through a single port pair).
+
+**Running a program**
+- [`Program`](./Flow#Program) / [`element`](./Flow#element) / [`document`](./Flow#document) / [`application`](./Flow#application).
 
 ## License
 
