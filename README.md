@@ -4,7 +4,7 @@ Write effectful Elm logic as composable steps.
 
 **Beginners:** `Flow` is a data type representing an Elm *imperative program* that can *do* things ("read/write the model", "call this API and take its return value", "wait for an incoming value on a port") and the library runs them. Your views emit `Flow` values as messages; nothing else to wire up. There is simply no `update` function.
 
-**Experts:** `Flow s` is a **free monad over state, Elm commands, subscription continuations, concurrent fan-out, and join points**. Its constructors - `Pure`, `Get (s -> Flow s a)`, `Set s`, `Command (Cmd (Flow s a))`, `Await` (channel-keyed subscription continuation), `Batch`, `Gather` (join point collecting branch results) - form a composable algebra over Elm's runtime effects. The `Msg`/`update` dispatch layer is eliminated; an interpreter takes its place.
+**Experts:** `Flow s` is a **free monad over state, Elm commands, subscription continuations, concurrent fan-out, and join points**. Its internal constructors - `Pure`, `Get (s -> Flow s a)`, `Set s (Flow s a)`, `Command (Cmd (Flow s a))`, `Await` (channel-keyed subscription continuation that opens a new channel or resumes an open one), `Batch`, `Gather` (join point collecting branch results), `Deliver` (a branch's JSON-encoded result handed to its join point) - form a composable algebra over Elm's runtime effects. The `Msg`/`update` dispatch layer is eliminated; an interpreter takes its place.
 
 What makes `Flow s` a monad? The fact that:
 
@@ -50,7 +50,7 @@ view model =
 
 ## Channels
 
-Channels connect subscriptions to a `Flow` pipeline. Use `Flow.connect` to build a channel from an Elm subscription port and a command port (or `Flow.listen` when a subscription port alone is enough), then pass it to `Flow.await` (receive one value) or `Flow.subscribe` (handle values indefinitely). Pass a port directly, or wrap it to decode values; values that fail to decode are dropped.
+Channels connect subscriptions to a `Flow` pipeline. Use `Flow.connect` to describe a channel as a `ChannelSpec` from an Elm subscription port and a command port (or `Flow.listen` when a subscription port alone is enough), then pass it to `Flow.await` (receive one value) or `Flow.subscribe` (handle values indefinitely); each of these opens a live `Channel` from the spec. Pass a port directly, or wrap it to decode values; values that fail to decode are dropped.
 
 ```elm
 -- In Ports.elm
@@ -189,11 +189,12 @@ saveAll drafts =
 ```
 
 A join counts on every command producing exactly one message. If a command in a
-branch produces several, as `Cmd.batch` can, the first one continues the branch and
-the rest run outside the join, uncollected. If it produces none, like an outgoing
-port, the join waits forever. Tasks and HTTP requests are always fine; send
-commands that never answer before the `batch` or after the `gather`. The
-[`gather`](./Flow#gather) docs have the details.
+branch produces several, as `Cmd.batch` can, the first message to arrive continues
+the branch, whichever command in the batch it came from, and the rest run outside
+the join, uncollected. If it produces none, like an outgoing port, the join waits
+forever. Tasks and HTTP requests are always fine; send commands that never answer
+before the `batch` or after the `gather`. The [`gather`](./Flow#gather) docs have
+the details.
 
 
 ## Optics helpers
@@ -204,9 +205,10 @@ that reads like imperative mutation.
 
 We recommend watching the recording of a talk by Edward Kmett titled "Lenses: A Functional Imperative".
 
-The optics helpers (`try`, `forAll`, `over`, `setAll`, `viaLens`, `viaPrism`) work with
+The optics helpers (`try`, `forAll`, `getAll`, `over`, `setAll`, `ifHas`, `whenHas`,
+`unlessHas`, `setting`, `locking`, `viaLens`, `viaPrism`) work with
 [`erlandsona/elm-accessors`](https://package.elm-lang.org/packages/erlandsona/elm-accessors/latest/)
-lenses to target sub-fields without manual getter/setter boilerplate.
+optics to target sub-fields without manual getter/setter boilerplate.
 
 ```elm
 type alias Model =
@@ -237,12 +239,19 @@ Flow.viaLens user normaliseUser
 ```
 
 `viaPrism` does the same through a prism, running the sub-`Flow` only when the
-prism matches and returning `Just` of its result (or `Nothing` when it does not):
+prism matches and returning `Just` of its result (or `Nothing` when it does not,
+including when it stops matching while the sub-`Flow` is suspended). The prism
+must target the whole model, so the model is a custom type; a lens composed with
+a prism is not a prism:
 
 ```elm
+type Model
+    = Active ActivePage
+    | Inactive
+
 handleActivePage : Flow Model (Maybe ())
 handleActivePage =
-    Flow.viaPrism activePage handlePageEvent
+    Flow.viaPrism active handlePageEvent
 ```
 
 ## API quick reference
@@ -285,7 +294,7 @@ handleActivePage =
 - [`lift`](./Flow#lift) (lift a `Cmd`),
 - [`liftUpdate`](./Flow#liftUpdate) (lift a TEA-style `update` function),
 - [`performTask`](./Flow#performTask) (run an infallible `Task`),
-- [`attemptTask`](./Flow#attemptTask) (fire-and-forget a fallible `Task`),
+- [`attemptTask`](./Flow#attemptTask) (run a fallible `Task`, discarding its `Result`),
 - [`attemptTaskWith`](./Flow#attemptTaskWith) (run a fallible `Task` and handle the `Result`).
 
 **Concurrency**
@@ -295,8 +304,8 @@ handleActivePage =
 - [`Codec`](./Flow#Codec) (encoder and decoder for `gather`).
 
 **Rendering**
-- [`yield`](./Flow#yield) (force a render cycle before continuing),
-- [`forceRendering`](./Flow#forceRendering) (render after every state write).
+- [`yield`](./Flow#yield) (hand control back to the runtime so the browser can repaint, then continue),
+- [`forceRendering`](./Flow#forceRendering) (`yield` after every state write).
 
 **Channels**
 - [`ChannelSpec`](./Flow#ChannelSpec) / [`Channel`](./Flow#Channel) / [`ChannelKey`](./Flow#ChannelKey),
