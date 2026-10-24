@@ -188,6 +188,13 @@ saveAll drafts =
         |> Flow.seq (Flow.modify (\m -> { m | status = AllSaved }))
 ```
 
+A join counts on every command producing exactly one message. If a command in a
+branch produces several, as `Cmd.batch` can, the first one continues the branch and
+the rest run outside the join, uncollected. If it produces none, like an outgoing
+port, the join waits forever. Tasks and HTTP requests are always fine; send
+commands that never answer before the `batch` or after the `gather`. The
+[`gather`](./Flow#gather) docs have the details.
+
 
 ## Optics helpers
 

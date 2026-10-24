@@ -105,6 +105,7 @@ import Html exposing (Html)
 import Json.Decode
 import Json.Encode
 import Process
+import Set exposing (Set)
 import Task exposing (Task)
 import Url exposing (Url)
 
@@ -544,26 +545,32 @@ batchM l =
     join (batch l)
 
 
-{-| Join the branches of a batched Flow: wait until every branch has finished,
-then continue once with all of their results.
-
-Results come in branch order (the order of the `batch` / `batchM` lists),
-not in completion order. Branches that terminate with `none` contribute
-nothing.
-
-Results are stored outside the Flow while the other branches are still
-running, so they travel as JSON: provide a [`Codec`](#Codec) for the result
-type. If its decoder rejects an encoded result, the joined Flow terminates.
-
-**WARNING:** the join waits for every branch forked inside it, including
-background branches started with [`async`](#async) or [`subscribe`](#subscribe).
-A branch that never finishes keeps the join waiting forever.
+{-| Wait for every branch of a batched Flow to finish, then continue once with
+all of their results. Results come in branch order, not completion order, and
+branches that end in `none` contribute nothing.
 
     -- fetch all users concurrently, then store them in input order
     Flow.batch userIds
         |> Flow.andThen fetchUser
         |> Flow.gather (Flow.Codec encodeUser userDecoder)
         |> Flow.andThen (\users -> Flow.modify (\m -> { m | users = users }))
+
+Why the JSON [`Codec`](#Codec)? While other branches are still running, finished
+results are kept outside the `Flow`. But one `Flow` might return `Int`s, another
+`String`s, another `User`s... The library needs a uniform storage for these! It
+doesn't know what type you will want to use, but as long as you supply a Codec,
+it can store JSON `Value`s. Caveat: make sure the Codec is correct. If the decoder
+rejects a result, the joined Flow terminates.
+
+The join waits for every branch forked inside it, including
+background branches started with [`async`](#async) or [`subscribe`](#subscribe).
+
+**WARNING:** `Cmd`s also have a `batch` operator. But Elm offers no way to count
+the messages a `Cmd` will produce. When a command answers more than once, the first
+answer continues the branch and the rest run outside the join, uncollected. If it
+never answers, as with an outgoing port or `Cmd.none`, the join waits forever.
+Tasks and HTTP requests always answer once, so they are safe; send commands that
+never answer or answer more than once before the `batch` or after the `gather`.
 
 -}
 gather : Codec a -> Flow s a -> Flow s (List a)
@@ -584,7 +591,8 @@ gather (Codec encoder decoder) flow =
 branch has finished, then continue once with `()`. Needs no `Codec`.
 
 **WARNING:** like `gather`, it waits for every branch forked inside it,
-including background branches.
+including background branches, and it treats commands the same way. See the
+warning on [`gather`](#gather).
 
     -- save every draft concurrently, then report once
     Flow.batch drafts
@@ -753,7 +761,7 @@ element args =
     Browser.element
         { update = runtimeUpdate
         , init = args.init >> runtimeInit
-        , view = \( model, _ ) -> Html.map UserFlow (args.view model)
+        , view = \( model, _ ) -> Html.map Continue (args.view model)
         , subscriptions = runtimeSubscriptions args.subscriptions
         }
 
@@ -785,7 +793,7 @@ document args =
                     doc =
                         args.view model
                 in
-                { title = doc.title, body = List.map (Html.map UserFlow) doc.body }
+                { title = doc.title, body = List.map (Html.map Continue) doc.body }
         , subscriptions = runtimeSubscriptions args.subscriptions
         }
 
@@ -820,23 +828,24 @@ application args =
                     doc =
                         args.view model
                 in
-                { title = doc.title, body = List.map (Html.map UserFlow) doc.body }
+                { title = doc.title, body = List.map (Html.map Continue) doc.body }
         , subscriptions = runtimeSubscriptions args.subscriptions
-        , onUrlRequest = \req -> UserFlow (args.onUrlRequest req)
-        , onUrlChange = \url -> UserFlow (args.onUrlChange url)
+        , onUrlRequest = \req -> Continue (args.onUrlRequest req)
+        , onUrlChange = \url -> Continue (args.onUrlChange url)
         }
 
 
 type alias Runtime s a =
     { nextId : Int
     , channels : Dict Int (Sub (RuntimeMsg s a))
+    , commands : Set Int
     , joins : Dict Int (JoinPoint s a)
     }
 
 
 type alias JoinPoint s a =
     { pending : Int
-    , results : List ( List Int, Json.Encode.Value )
+    , results : Dict (List Int) Json.Encode.Value
     , continue : List Json.Encode.Value -> Flow s a
     , parent : Fiber
     }
@@ -848,8 +857,8 @@ type Fiber
 
 
 type RuntimeMsg s a
-    = UserFlow (Flow s a)
-    | Continue Fiber (Flow s a)
+    = Continue (Flow s a)
+    | Reply Int Fiber (Flow s a)
     | Unsubscribe Int Fiber (Flow s a)
 
 
@@ -859,17 +868,21 @@ type alias RuntimeStep s a =
 
 runtimeInit : ( s, Flow s a ) -> ( ( s, Runtime s a ), Cmd (RuntimeMsg s a) )
 runtimeInit ( model, flow ) =
-    runtimeUpdate (UserFlow flow) ( model, { nextId = 0, channels = Dict.empty, joins = Dict.empty } )
+    runtimeUpdate (Continue flow) ( model, { nextId = 0, channels = Dict.empty, commands = Set.empty, joins = Dict.empty } )
 
 
 runtimeUpdate : RuntimeMsg s a -> ( s, Runtime s a ) -> ( ( s, Runtime s a ), Cmd (RuntimeMsg s a) )
 runtimeUpdate msg ( model, runtime ) =
     case msg of
-        UserFlow flow ->
+        Continue flow ->
             commit (run Root flow model runtime)
 
-        Continue fiber flow ->
-            commit (run fiber flow model runtime)
+        Reply commandId fiber flow ->
+            if Set.member commandId runtime.commands then
+                commit (run fiber flow model { runtime | commands = Set.remove commandId runtime.commands })
+
+            else
+                commit (run Root flow model runtime)
 
         Unsubscribe channelId fiber flow ->
             if Dict.member channelId runtime.channels then
@@ -887,7 +900,7 @@ commit ( model, runtime, cmd ) =
 runtimeSubscriptions : (s -> Sub (Flow s a)) -> ( s, Runtime s a ) -> Sub (RuntimeMsg s a)
 runtimeSubscriptions userSubs ( model, runtime ) =
     Sub.batch
-        [ Sub.map UserFlow (userSubs model)
+        [ Sub.map Continue (userSubs model)
         , Sub.batch (Dict.values runtime.channels)
         ]
 
@@ -927,7 +940,15 @@ run fiber flow model runtime =
             ( finalModel, finalRuntime, Cmd.batch cmds )
 
         Command cmd ->
-            ( model, runtime, Cmd.map (Continue fiber) cmd )
+            case fiber of
+                Root ->
+                    ( model, runtime, Cmd.map Continue cmd )
+
+                Branch _ _ ->
+                    ( model
+                    , { runtime | nextId = runtime.nextId + 1, commands = Set.insert runtime.nextId runtime.commands }
+                    , Cmd.map (Reply runtime.nextId fiber) cmd
+                    )
 
         Await request sub ->
             let
@@ -949,7 +970,7 @@ run fiber flow model runtime =
                 wrapMsg fired =
                     case fired of
                         Nothing ->
-                            UserFlow none
+                            Continue none
 
                         Just next ->
                             Unsubscribe channelId fiber next
@@ -972,7 +993,7 @@ run fiber flow model runtime =
                 model
                 { runtime
                     | nextId = runtime.nextId + 1
-                    , joins = Dict.insert joinId { pending = 1, results = [], continue = continue, parent = fiber } runtime.joins
+                    , joins = Dict.insert joinId { pending = 1, results = Dict.empty, continue = continue, parent = fiber } runtime.joins
                 }
 
 
@@ -990,13 +1011,16 @@ finishFiber fiber delivered model runtime =
                 Just joinPoint ->
                     let
                         results =
-                            delivered
-                                |> Maybe.map (\value -> ( path, value ) :: joinPoint.results)
-                                |> Maybe.withDefault joinPoint.results
+                            case delivered of
+                                Just value ->
+                                    Dict.insert path value joinPoint.results
+
+                                Nothing ->
+                                    joinPoint.results
                     in
                     if joinPoint.pending == 1 then
                         run joinPoint.parent
-                            (joinPoint.continue (List.map Tuple.second (List.sortBy Tuple.first results)))
+                            (joinPoint.continue (Dict.values results))
                             model
                             { runtime | joins = Dict.remove joinId runtime.joins }
 
